@@ -1,6 +1,5 @@
 // lib/pages/home.dart
 
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -8,9 +7,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as p;
-import 'package:http_parser/http_parser.dart';
+import 'package:http/http.dart' as http; // Kept for platform compatibility, though OCR helpers removed
 
 import 'verification.dart'; // <- uses verifyDriverAndShowDialog()
 
@@ -22,486 +19,46 @@ class HomePageContent extends StatefulWidget {
 }
 
 class _HomePageContentState extends State<HomePageContent> {
-  // ====== Configure Backend / Model URLs HERE ======
-  // Leave verify empty if you don't want verify POSTs from the app
-  final String _verifyBaseUrl = '';
+  // Removed DL/RC OCR Configuration
 
-  // OCR model endpoints (use the exact working paths)
-  final String _dlOcrUrl = 'https://dl-extractor-service-777302308889.us-central1.run.app';
-  // UPDATED RC API endpoint
-  final String _rcOcrUrl = 'https://enhanced-alpr-980624091991.us-central1.run.app/recognize_plate/';
-
-  // Field names used when sending multipart to each OCR endpoint.
-  final String _dlOcrFieldName = 'image_file';
-  final String _rcOcrFieldName = 'file';
-  // ================================================
-
-  // App theme colors to match government portal
+  // App theme colors (unchanged)
   static const Color _primaryBlue = Color(0xFF1E3A8A);
   static const Color _lightGray = Color(0xFFF8FAFC);
   static const Color _borderGray = Color(0xFFE2E8F0);
   static const Color _textGray = Color(0xFF64748B);
 
-  // Controllers & state for the Home UI
-  final TextEditingController _dlController = TextEditingController();
-  final TextEditingController _rcController = TextEditingController();
+  // Controllers & state - ONLY FACE/DRIVER REMAINS
+  // Removed _dlController, _rcController
 
-  String? _dlImageName;
-  String? _rcImageName;
   String? _driverImageName;
 
-  // Keep references to actual picked files so we can attach them later
-  XFile? _lastDlXFile;
-  PlatformFile? _lastDlPFile;
-
-  XFile? _lastRcXFile;
-  PlatformFile? _lastRcPFile;
-
+  // Removed DL/RC file references
   XFile? _lastDriverXFile;
   PlatformFile? _lastDriverPFile;
 
   // Loading / extracting states
   bool _isVerifying = false;
-  bool _dlExtracting = false;
-  bool _rcExtracting = false;
+  // Removed _dlExtracting, _rcExtracting
 
   final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void dispose() {
-    _dlController.dispose();
-    _rcController.dispose();
+    // DL/RC controllers were removed, so only calling super.dispose is necessary.
     super.dispose();
   }
 
   // Helper to know if we can enable the Verify button
   bool get _hasInput {
-    if (_dlController.text.trim().isNotEmpty) return true;
-    if (_rcController.text.trim().isNotEmpty) return true;
+    // Only checks for driver image
     if (_lastDriverXFile != null) return true;
     if (_lastDriverPFile != null) return true;
     return false;
   }
 
-  // ----------------- Helpers: create MultipartFile ---------------------
-  // Determine media type from filename extension; return null if unknown/non-image
-  MediaType? _mediaTypeForFilename(String filename) {
-    final ext = p.extension(filename).toLowerCase();
-    if (ext == '.jpg' || ext == '.jpeg') return MediaType('image', 'jpeg');
-    if (ext == '.png') return MediaType('image', 'png');
-    if (ext == '.webp') return MediaType('image', 'webp');
-    if (ext == '.bmp') return MediaType('image', 'bmp');
-    if (ext == '.gif') return MediaType('image', 'gif');
-    // Add other image types if needed
-    return null;
-  }
+  // Removed all OCR/DL/RC related helper methods.
 
-  bool _isImageFilename(String filename) => _mediaTypeForFilename(filename) != null;
-
-  Future<http.MultipartFile?> _makeMultipartFromPicked({
-    required String fieldName,
-    XFile? xfile,
-    PlatformFile? pfile,
-  }) async {
-    try {
-      String? filename;
-      if (!kIsWeb && xfile != null && xfile.path.isNotEmpty) {
-        filename = p.basename(xfile.path);
-        final mediaType = _mediaTypeForFilename(filename);
-        if (mediaType != null) {
-          return await http.MultipartFile.fromPath(
-            fieldName,
-            xfile.path,
-            filename: filename,
-            contentType: mediaType,
-          );
-        } else {
-          // if unknown extension, still try to send (server might accept), but prefer bytes fallback
-          final bytes = await xfile.readAsBytes();
-          final fallbackName = xfile.name.isNotEmpty ? xfile.name : filename;
-          final fallbackMedia = _mediaTypeForFilename(fallbackName ?? '');
-          if (fallbackMedia != null) {
-            return http.MultipartFile.fromBytes(fieldName, bytes, filename: fallbackName, contentType: fallbackMedia);
-          } else {
-            // unknown/unsupported: return null so caller can skip quickly
-            return null;
-          }
-        }
-      }
-
-      if (pfile != null) {
-        filename = pfile.name;
-        final mediaType = _mediaTypeForFilename(filename);
-        if (mediaType != null) {
-          if (pfile.bytes != null) {
-            return http.MultipartFile.fromBytes(fieldName, pfile.bytes!, filename: filename, contentType: mediaType);
-          } else if (pfile.path != null && pfile.path!.isNotEmpty) {
-            return await http.MultipartFile.fromPath(fieldName, pfile.path!, filename: filename, contentType: mediaType);
-          }
-        } else {
-          // not an image (e.g., pdf). Return null quickly.
-          return null;
-        }
-      }
-
-      if (xfile != null) {
-        // fallback reading bytes for web or if path wasn't available earlier
-        final bytes = await xfile.readAsBytes();
-        final fallbackName = xfile.name;
-        final mediaType = _mediaTypeForFilename(fallbackName);
-        if (mediaType != null) {
-          return http.MultipartFile.fromBytes(fieldName, bytes, filename: fallbackName, contentType: mediaType);
-        } else {
-          return null;
-        }
-      }
-    } catch (e) {
-      debugPrint('[_makeMultipartFromPicked] error: $e');
-    }
-    return null;
-  }
-
-  Future<void> _uploadForOcrAndFill({
-    required String uploadUrl,
-    required String primaryFieldName,
-    required bool isDlModel,
-    XFile? xfile,
-    PlatformFile? pfile,
-    required ValueSetter<String?> setFileName,
-    required TextEditingController controller,
-    required VoidCallback setExtractingTrue,
-    required VoidCallback setExtractingFalse,
-  }) async {
-    setExtractingTrue();
-    controller.text = 'Extracting...';
-
-    try {
-      // Fix/append model-specific path if user provided a base host without path
-      String effectiveUrl = uploadUrl;
-      if (effectiveUrl.contains('dl-extractor-service-777302308889.us-central1.run.app') &&
-          !effectiveUrl.contains('extract/')) {
-        effectiveUrl = '${effectiveUrl.replaceAll(RegExp(r'/+$'), '')}/extract/';
-        debugPrint('Adjusted DL URL to: $effectiveUrl');
-      }
-
-      // Choose field candidates: for DL prefer image_file, for RC prefer file
-      final List<String> fieldCandidates = isDlModel
-          ? [primaryFieldName, 'image_file', 'dl_image', 'image', 'file']
-          : [primaryFieldName, 'file'];
-
-      final Uri uri = Uri.parse(effectiveUrl);
-
-      // QUICK CHECK: if RC endpoint, ensure chosen file is an image (avoid repeated 400s)
-      String? chosenName;
-      if (_lastRcPFile != null || _lastRcXFile != null || _lastDlPFile != null || _lastDlXFile != null) {
-        // determine for current call which file is being used (prioritize xfile/pfile args)
-        if (xfile != null) chosenName = xfile.name.isNotEmpty ? xfile.name : p.basename(xfile.path);
-        else if (pfile != null) chosenName = pfile.name;
-      }
-
-      if (!isDlModel) {
-        // RC endpoint requires an image — if filename extension isn't an image, bail fast
-        if (chosenName != null && !_isImageFilename(chosenName)) {
-          controller.text = '';
-          _showErrorSnackBar('Selected file is not a supported image. Please choose JPG/PNG for number plate detection.');
-          setExtractingFalse();
-          return;
-        }
-      }
-
-      bool success = false;
-
-      for (final fieldName in fieldCandidates) {
-        final mp = await _makeMultipartFromPicked(fieldName: fieldName, xfile: xfile, pfile: pfile);
-        if (mp == null) {
-          debugPrint('Could not build multipart for field "$fieldName" (likely unsupported file type or missing bytes)');
-          continue;
-        }
-
-        final req = http.MultipartRequest('POST', uri);
-        req.files.clear();
-        req.files.add(mp);
-
-        debugPrint('Posting to $effectiveUrl (field="$fieldName")');
-        try {
-          final streamed = await req.send();
-          final res = await http.Response.fromStream(streamed);
-
-          debugPrint('Response status ${res.statusCode} from $effectiveUrl (field="$fieldName")');
-
-          if (res.statusCode != 200) {
-            debugPrint('Body: ${res.body}');
-            continue;
-          }
-
-          final body = res.body.isNotEmpty ? jsonDecode(res.body) : null;
-
-          String? extractedValue;
-
-          if (isDlModel) {
-            // 1) prefer dl_numbers[0]
-            if (body != null && body['dl_numbers'] is List && (body['dl_numbers'] as List).isNotEmpty) {
-              final first = (body['dl_numbers'] as List).first;
-              if (first != null && first is String && first.trim().isNotEmpty) {
-                extractedValue = first.trim();
-              }
-            }
-
-            // 2) fallback to extracted_text if exists
-            if (extractedValue == null && body != null && body['extracted_text'] != null) {
-              final t = (body['extracted_text'] as String).trim();
-              if (t.isNotEmpty) extractedValue = t;
-            }
-
-            // 3) fallback: hunt in raw_text for DL-like token
-            if (extractedValue == null && body != null && body['raw_text'] != null) {
-              String raw = (body['raw_text'] as String).toUpperCase();
-              final cleaned = raw.replaceAll(RegExp(r'[^A-Z0-9\s]'), ' ');
-              final tokenReg = RegExp(r'\b([A-Z0-9]{6,25})\b', caseSensitive: false);
-              final matches = tokenReg.allMatches(cleaned).map((m) => m.group(1)!).toList();
-              String? best;
-              for (final tok in matches) {
-                final letters = RegExp(r'[A-Z]').allMatches(tok).length;
-                final digits = RegExp(r'\d').allMatches(tok).length;
-                if (letters >= 1 && digits >= 4) {
-                  best = tok;
-                  break;
-                }
-              }
-              if (best == null) {
-                final loose = RegExp(r'([A-Z]{1,2}\s*\d{2,}\s*[A-Z0-9]{0,3}\s*\d{3,})', caseSensitive: false);
-                final m = loose.firstMatch(raw);
-                if (m != null) best = m.group(1);
-              }
-              if (best != null) {
-                extractedValue = best.replaceAll(RegExp(r'\s+'), '');
-              }
-            }
-          } else {
-            // -------- RC model (NEW) --------
-            // New API (enhanced-alpr) returns a structure like:
-            // {
-            //   "success": true,
-            //   "plates_detected": 1,
-            //   "results": [ { "plate_text": "22BH65174", "ocr_confidence": "89.66%", ... } ]
-            // }
-            // We prefer results[0].plate_text when present.
-            if (body != null && body['results'] is List && (body['results'] as List).isNotEmpty) {
-              final firstPlate = (body['results'] as List)[0];
-              if (firstPlate is Map) {
-                final plateTextRaw = (firstPlate['plate_text'] ?? '').toString().trim();
-                if (plateTextRaw.isNotEmpty) {
-                  extractedValue = plateTextRaw;
-                }
-              }
-            }
-
-            // Defensive legacy fallbacks (rare)
-            if (extractedValue == null && body != null && body['extracted_text'] != null) {
-              final t = (body['extracted_text'] as String).trim();
-              if (t.isNotEmpty) extractedValue = t;
-            } else if (extractedValue == null && body != null && body['raw_text'] != null) {
-              final raw = (body['raw_text'] as String).toUpperCase();
-              final reg = RegExp(r'([A-Z]{2}\s*\d{1,2}\s*[A-Z]{0,2}\s*\d{3,4})', caseSensitive: false);
-              final match = reg.firstMatch(raw);
-              if (match != null) extractedValue = match.group(1)?.replaceAll(RegExp(r'\s+'), '');
-            }
-          }
-
-          if (extractedValue != null && extractedValue.isNotEmpty) {
-            controller.text = extractedValue;
-            if (body != null && body['filename'] != null) {
-              setFileName(body['filename'] as String);
-            }
-            success = true;
-            debugPrint('OCR success from $effectiveUrl (field="$fieldName"), extracted="$extractedValue"');
-            break;
-          } else {
-            debugPrint('OCR returned 200 but no usable text. Body: ${res.body}');
-            continue;
-          }
-        } catch (e) {
-          debugPrint('Exception during OCR POST to $effectiveUrl (field="$fieldName"): $e');
-          continue;
-        }
-      }
-
-      if (!success) {
-        _showErrorSnackBar('OCR failed for the provided endpoint. Check endpoint/field names.');
-        controller.text = '';
-      }
-    } catch (err) {
-      controller.text = '';
-      _showErrorSnackBar('An error occurred while communicating with the OCR service.');
-    } finally {
-      setExtractingFalse();
-    }
-  }
-
-  // ----------------- Pick handlers (camera/gallery/file) --------------
-
-  Future<void> _pickDlImage() async {
-    _showImageSourceOptions(
-      title: 'Select Driving License',
-      onCamera: () async {
-        final XFile? picked = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
-        if (picked != null) {
-          setState(() {
-            _dlImageName = picked.name;
-            _lastDlXFile = picked;
-            _lastDlPFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _dlOcrUrl,
-            primaryFieldName: _dlOcrFieldName,
-            isDlModel: true,
-            xfile: picked,
-            setFileName: (s) => setState(() => _dlImageName = s),
-            controller: _dlController,
-            setExtractingTrue: () => setState(() => _dlExtracting = true),
-            setExtractingFalse: () => setState(() => _dlExtracting = false),
-          );
-        }
-      },
-      onGallery: () async {
-        final XFile? picked = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
-        if (picked != null) {
-          setState(() {
-            _dlImageName = picked.name;
-            _lastDlXFile = picked;
-            _lastDlPFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _dlOcrUrl,
-            primaryFieldName: _dlOcrFieldName,
-            isDlModel: true,
-            xfile: picked,
-            setFileName: (s) => setState(() => _dlImageName = s),
-            controller: _dlController,
-            setExtractingTrue: () => setState(() => _dlExtracting = true),
-            setExtractingFalse: () => setState(() => _dlExtracting = false),
-          );
-        }
-      },
-      onFile: () async {
-        final result = await FilePicker.platform.pickFiles(
-          type: FileType.custom,
-          allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
-          withData: true,
-        );
-        if (result != null && result.files.isNotEmpty) {
-          final pfile = result.files.single;
-          setState(() {
-            _dlImageName = pfile.name;
-            _lastDlPFile = pfile;
-            _lastDlXFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _dlOcrUrl,
-            primaryFieldName: _dlOcrFieldName,
-            isDlModel: true,
-            pfile: pfile,
-            setFileName: (s) => setState(() => _dlImageName = s),
-            controller: _dlController,
-            setExtractingTrue: () => setState(() => _dlExtracting = true),
-            setExtractingFalse: () => setState(() => _dlExtracting = false),
-          );
-        }
-      },
-    );
-  }
-
-  Future<void> _pickRcImage() async {
-    _showImageSourceOptions(
-      title: 'Select Vehicle Registration (RC)',
-      onCamera: () async {
-        final XFile? picked = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
-        if (picked != null) {
-          setState(() {
-            _rcImageName = picked.name;
-            _lastRcXFile = picked;
-            _lastRcPFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _rcOcrUrl,
-            primaryFieldName: _rcOcrFieldName,
-            isDlModel: false,
-            xfile: picked,
-            setFileName: (s) => setState(() => _rcImageName = s),
-            controller: _rcController,
-            setExtractingTrue: () => setState(() => _rcExtracting = true),
-            setExtractingFalse: () => setState(() => _rcExtracting = false),
-          );
-        }
-      },
-      onGallery: () async {
-        final XFile? picked = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
-        if (picked != null) {
-          setState(() {
-            _rcImageName = picked.name;
-            _lastRcXFile = picked;
-            _lastRcPFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _rcOcrUrl,
-            primaryFieldName: _rcOcrFieldName,
-            isDlModel: false,
-            xfile: picked,
-            setFileName: (s) => setState(() => _rcImageName = s),
-            controller: _rcController,
-            setExtractingTrue: () => setState(() => _rcExtracting = true),
-            setExtractingFalse: () => setState(() => _rcExtracting = false),
-          );
-        }
-      },
-      onFile: () async {
-        final result = await FilePicker.platform.pickFiles(
-          type: FileType.custom,
-          allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
-          withData: true,
-        );
-        if (result != null && result.files.isNotEmpty) {
-          final pfile = result.files.single;
-          setState(() {
-            _rcImageName = pfile.name;
-            _lastRcPFile = pfile;
-            _lastRcXFile = null;
-          });
-          await _uploadForOcrAndFill(
-            uploadUrl: _rcOcrUrl,
-            primaryFieldName: _rcOcrFieldName,
-            isDlModel: false,
-            pfile: pfile,
-            setFileName: (s) => setState(() => _rcImageName = s),
-            controller: _rcController,
-            setExtractingTrue: () => setState(() => _rcExtracting = true),
-            setExtractingFalse: () => setState(() => _rcExtracting = false),
-          );
-        }
-      },
-    );
-  }
-
-  // Re-run RC extraction by re-sending the last-picked RC image to the server.
-  Future<void> _refreshRcExtraction() async {
-    if (_lastRcXFile == null && _lastRcPFile == null) {
-      _showInfoSnackBar('No vehicle image selected to refresh.');
-      return;
-    }
-
-    await _uploadForOcrAndFill(
-      uploadUrl: _rcOcrUrl,
-      primaryFieldName: _rcOcrFieldName,
-      isDlModel: false,
-      xfile: _lastRcXFile,
-      pfile: _lastRcPFile,
-      setFileName: (s) => setState(() => _rcImageName = s),
-      controller: _rcController,
-      setExtractingTrue: () => setState(() => _rcExtracting = true),
-      setExtractingFalse: () => setState(() => _rcExtracting = false),
-    );
-  }
-
+  // Only the driver image picker remains
   Future<void> _pickDriverImage() async {
     _showImageSourceOptions(
       title: 'Select Driver Image',
@@ -580,7 +137,7 @@ class _HomePageContentState extends State<HomePageContent> {
                 ListTile(
                   leading: const Icon(Icons.upload_file),
                   title: const Text('Choose file (Files)'),
-                  subtitle: const Text('Images and PDFs'),
+                  subtitle: const Text('Images only'), // Updated subtitle
                   onTap: () {
                     Navigator.of(ctx).pop();
                     onFile();
@@ -596,8 +153,7 @@ class _HomePageContentState extends State<HomePageContent> {
 
   // ---------------- Verification: delegate to verification.dart ----------
   Future<void> _handleVerification() async {
-    final dlNumber = _dlController.text.trim();
-    final rcNumber = _rcController.text.trim();
+    // Removed dlNumber and rcNumber
 
     // Build driverFile (if any) - only on non-web platforms we can build a dart:io File
     File? driverFile;
@@ -608,28 +164,25 @@ class _HomePageContentState extends State<HomePageContent> {
         driverFile = File(_lastDriverPFile!.path!);
       }
     } else {
-      // On web: cannot convert picked file into dart:io File.
-      // If only driver image is selected on web, inform user that face verification via file path is not supported.
-      if (dlNumber.isEmpty && rcNumber.isEmpty && (_lastDriverXFile != null || _lastDriverPFile != null)) {
-        _showErrorSnackBar('Face verification from web is currently unsupported. Try from a mobile device or enter DL/RC numbers.');
+      // On web: only driver image selected is not supported.
+      if (_lastDriverXFile != null || _lastDriverPFile != null) {
+        _showErrorSnackBar('Face verification from web is currently unsupported. Try from a mobile device.');
         return;
       }
-      // If DL/RC present, proceed without driverFile (face verification skipped in backend call)
       driverFile = null;
     }
 
-    if (dlNumber.isEmpty && rcNumber.isEmpty && driverFile == null) {
-      _showErrorSnackBar('Please provide a DL number, a Vehicle number, or a Driver Image to verify.');
+    if (driverFile == null) {
+      _showErrorSnackBar('Please provide a Driver Image to verify.');
       return;
     }
 
     setState(() => _isVerifying = true);
 
     try {
+      // Call the MODIFIED verification function (removed dlNumber and rcNumber args)
       await verifyDriverAndShowDialog(
         context,
-        dlNumber: dlNumber.isNotEmpty ? dlNumber : null,
-        rcNumber: rcNumber.isNotEmpty ? rcNumber : null,
         driverImageFile: driverFile,
         location: 'Toll-Plaza-1',
         tollgate: 'Gate-A',
@@ -639,12 +192,8 @@ class _HomePageContentState extends State<HomePageContent> {
     } finally {
       setState(() {
         _isVerifying = false;
-        // Reset selected names and file references (keep extracted text in controllers so user can edit if desired)
-        _dlImageName = null;
-        _rcImageName = null;
+        // Reset selected names and file references
         _driverImageName = null;
-        _lastDlXFile = _lastDlPFile = null;
-        _lastRcXFile = _lastRcPFile = null;
         _lastDriverXFile = _lastDriverPFile = null;
       });
     }
@@ -759,7 +308,7 @@ class _HomePageContentState extends State<HomePageContent> {
     );
   }
 
-  // ----------------- Build UI (kept same & minimal) -------------------
+  // ----------------- Build UI -------------------
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -770,7 +319,7 @@ class _HomePageContentState extends State<HomePageContent> {
       child: SingleChildScrollView(
         child: Column(
           children: [
-            // Header section with government branding
+            // Header section
             Container(
               width: double.infinity,
               color: Colors.white,
@@ -778,7 +327,7 @@ class _HomePageContentState extends State<HomePageContent> {
               child: Column(
                 children: [
                   Text(
-                    'Driving License and Vehicle Registration Certificate Verification Portal',
+                    'Face Surveillance Portal', // UPDATED TITLE
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 20,
@@ -813,70 +362,14 @@ class _HomePageContentState extends State<HomePageContent> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Driving License Section
-                    _buildSectionHeader(
-                      icon: Icons.credit_card,
-                      title: 'Upload Driving License',
-                      subtitle: 'Upload your driving license document',
-                    ),
-                    const SizedBox(height: 16),
+                    // REMOVED Driving License Section
+                    // REMOVED Vehicle Registration Section
 
-                    _buildFileUploadCard(
-                      label: 'Choose Driving License File',
-                      fileName: _dlImageName,
-                      onTap: _pickDlImage,
-                      icon: Icons.upload_file,
-                      isDriver: false,
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    _buildTextInput(
-                      controller: _dlController,
-                      label: 'Driving License Number',
-                      hint: _dlExtracting ? 'Extracting...' : 'Select image or enter manually',
-                      prefixIcon: Icons.confirmation_number,
-                      enabled: !_dlExtracting,
-                    ),
-
-                    const SizedBox(height: 24),
-
-                    // Vehicle Registration Section
-                    _buildSectionHeader(
-                      icon: Icons.directions_car,
-                      title: 'Upload Vehicle Registration Number (Number Plate Number)',
-                      subtitle: 'Upload your vehicle registration certificate',
-                    ),
-                    const SizedBox(height: 16),
-
-                    _buildFileUploadCard(
-                      label: 'Choose Vehicle Registration File',
-                      fileName: _rcImageName,
-                      onTap: _pickRcImage,
-                      icon: Icons.upload_file,
-                      isDriver: false,
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    _buildTextInput(
-                      controller: _rcController,
-                      label: 'Vehicle Number',
-                      hint: _rcExtracting ? 'Extracting...' : 'Select image or enter manually',
-                      prefixIcon: Icons.directions_car,
-                      enabled: !_rcExtracting,
-                      // Show refresh button when an RC image is present; pressing it will re-call the RC API.
-                      showAlternateButton: (_lastRcXFile != null || _lastRcPFile != null),
-                      onAlternatePressed: _refreshRcExtraction,
-                    ),
-
-                    const SizedBox(height: 24),
-
-                    // Driver Image Section
+                    // Driver Image Section (Kept)
                     _buildSectionHeader(
                       icon: Icons.person,
                       title: 'Upload Driver Image',
-                      subtitle: 'Upload a clear photo of the driver',
+                      subtitle: 'Upload a clear photo of the driver for face recognition', // UPDATED SUBTITLE
                     ),
                     const SizedBox(height: 16),
 
@@ -885,17 +378,17 @@ class _HomePageContentState extends State<HomePageContent> {
                       fileName: _driverImageName,
                       onTap: _pickDriverImage,
                       icon: Icons.person_add_alt_1,
-                      isDriver: true, // <--- show thumbnail + preview behavior
+                      isDriver: true,
                     ),
 
                     const SizedBox(height: 32),
 
-                    // Verify Information Button
+                    // Verify Information Button (Modified onClick and text)
                     SizedBox(
                       width: double.infinity,
                       height: 56,
                       child: ElevatedButton(
-                        onPressed: _isVerifying ? null : _handleVerification,
+                        onPressed: _isVerifying ? null : (_hasInput ? _handleVerification : null),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _primaryBlue,
                           foregroundColor: Colors.white,
@@ -926,7 +419,7 @@ class _HomePageContentState extends State<HomePageContent> {
                           children: const [
                             Icon(Icons.verified_user, size: 20),
                             SizedBox(width: 8),
-                            Text('Verify Information', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                            Text('Verify Driver Face', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)), // UPDATED TEXT
                           ],
                         ),
                       ),
@@ -934,7 +427,7 @@ class _HomePageContentState extends State<HomePageContent> {
 
                     const SizedBox(height: 16),
 
-                    // Info note
+                    // Info note (Updated text)
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -948,7 +441,7 @@ class _HomePageContentState extends State<HomePageContent> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'AI-powered verification will extract information from uploaded documents automatically.',
+                              'AI-powered facial recognition will verify the driver against the suspect database.', // UPDATED TEXT
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.blue.shade700,
@@ -1070,8 +563,8 @@ class _HomePageContentState extends State<HomePageContent> {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           border: Border.all(color: _borderGray),
-          borderRadius: BorderRadius.circular(8),
           color: fileName != null ? Colors.green.shade50 : _lightGray,
+          borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
           children: [
@@ -1099,45 +592,5 @@ class _HomePageContentState extends State<HomePageContent> {
     );
   }
 
-  Widget _buildTextInput({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    required IconData prefixIcon,
-    bool enabled = true,
-    bool showAlternateButton = false,
-    VoidCallback? onAlternatePressed,
-  }) {
-    return TextFormField(
-      controller: controller,
-      enabled: enabled,
-      style: const TextStyle(fontSize: 14),
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        prefixIcon: Icon(prefixIcon, size: 18),
-        suffixIcon: showAlternateButton
-            ? IconButton(
-          icon: const Icon(Icons.refresh),
-          onPressed: onAlternatePressed,
-        )
-            : null,
-        filled: true,
-        fillColor: Colors.grey.shade50,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: _borderGray),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: _borderGray),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: _primaryBlue, width: 2),
-        ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      ),
-    );
-  }
+// REMOVED _buildTextInput as text fields are no longer needed.
 }

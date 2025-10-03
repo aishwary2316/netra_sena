@@ -26,7 +26,7 @@ class AuthPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Netra Sena Login',
+      title: 'Face Surveillance Portal Login',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.indigo,
@@ -54,6 +54,14 @@ class _LoginPageState extends State<LoginPage> {
   bool _loading = false;
   String? _error;
 
+  bool parseBool(dynamic v) {
+    if (v == null) return false;
+    if (v is bool) return v;
+    if (v is num) return v != 0;
+    final s = v.toString().trim().toLowerCase();
+    return s == 'true' || s == '1' || s == 'yes';
+  }
+
   Future<void> _signIn() async {
     setState(() {
       _loading = true;
@@ -65,46 +73,37 @@ class _LoginPageState extends State<LoginPage> {
 
     if (email.isEmpty || password.isEmpty) {
       setState(() {
-        _error = 'Please enter email and password';
+        _error = 'Please enter username and password';
         _loading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter email and password')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter username and password')));
       return;
-    }
-
-    bool parseBool(dynamic v) {
-      if (v == null) return false;
-      if (v is bool) return v;
-      if (v is num) return v != 0;
-      final s = v.toString().trim().toLowerCase();
-      return s == 'true' || s == '1' || s == 'yes';
     }
 
     try {
       print('auth.dart -> attempting login for: $email');
-      final result = await api.login(email, password);
+      // MODIFIED: Use named parameters (username: email) for the new service
+      final result = await api.login(username: email, password: password);
       print('auth.dart -> login result: $result');
 
-      if (result['ok'] == true) {
-        final data = result['data'] ?? {};
+      // MODIFIED: Check for 'success' key and extract 'user' data
+      if (result['success'] == true) {
+        final data = result['user'] ?? {};
         final prefs = await SharedPreferences.getInstance();
-        final String name = data['name'] ?? data['username'] ?? '';
-        final String userId = data['userId']?.toString() ?? data['id']?.toString() ?? '';
+
+        final String name = data['username'] ?? data['name'] ?? '';
+        final String userId = data['userId']?.toString() ?? data['id']?.toString() ?? data['_id']?.toString() ?? '';
         final String userEmail = data['email'] ?? email;
         final String role = data['role'] ?? '';
-        final dynamic rawActive = data['isActive'];
-        final bool isActive = rawActive == true ||
-            rawActive == 1 ||
-            rawActive?.toString().trim().toLowerCase() == 'true' ||
-            rawActive?.toString().trim() == '1';
 
         final String loginTimeIso = DateTime.now().toIso8601String();
 
+        // Save session data to SharedPreferences for HomePage to use
         if (userId.isNotEmpty) await prefs.setString('user_id', userId);
         if (name.isNotEmpty) await prefs.setString('user_name', name);
         if (userEmail.isNotEmpty) await prefs.setString('user_email', userEmail);
         if (role.isNotEmpty) await prefs.setString('user_role', role);
-        await prefs.setBool('user_is_active', isActive);
+        await prefs.setBool('user_is_active', parseBool(data['isActive']));
         await prefs.setString('user_login_time', loginTimeIso);
 
         if (!mounted) return;
@@ -120,7 +119,8 @@ class _LoginPageState extends State<LoginPage> {
           ),
         );
       } else {
-        final msg = result['message'] ?? 'Login failed';
+        // Handle explicit success: false response
+        final msg = result['message'] ?? result['error'] ?? 'Login failed';
         setState(() {
           _error = msg;
         });
@@ -128,6 +128,15 @@ class _LoginPageState extends State<LoginPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Login failed: $msg')));
         }
+      }
+    } on ApiException catch (e) { // Catch the specific exception from the new api_service
+      print('auth.dart -> API exception in _signIn: $e');
+      final msg = e.message;
+      setState(() {
+        _error = msg;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Login failed: $msg')));
       }
     } catch (e) {
       print('auth.dart -> unexpected exception in _signIn: $e');
@@ -175,14 +184,15 @@ class _LoginPageState extends State<LoginPage> {
                 const SizedBox(height: 24),
                 const Align(
                     alignment: Alignment.centerLeft,
-                    child: Text('Email', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                    // UPDATED LABEL from Email to Username
+                    child: Text('Username', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
                 const SizedBox(height: 8),
                 TextField(
                   controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
+                  // Removed explicit keyboardType: TextInputType.emailAddress
                   decoration: InputDecoration(
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    hintText: 'someone@example.com',
+                    hintText: 'Enter your username', // UPDATED HINT
                     contentPadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
                   ),
                 ),
@@ -288,7 +298,7 @@ class _LoginPageState extends State<LoginPage> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               //Text('Government of India', style: TextStyle(fontSize: 12, color: Colors.black54)),
-                              Text('Netra Sena',
+                              Text('Face Surveillance Portal', // UPDATED TITLE
                                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.indigo)),
                             ],
                           ),

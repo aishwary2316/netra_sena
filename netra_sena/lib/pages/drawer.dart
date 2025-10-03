@@ -54,27 +54,32 @@ class AppDrawer extends StatelessWidget {
     // Define the list of tiles to display based on the user's role
     final List<Widget> drawerTiles = [];
 
-    // All users have access to Home
+    // All users have access to Home (Index 0)
     drawerTiles.add(_buildDrawerTile(context, icon: Icons.home, title: 'Home', selected: selectedIndex == 0, onTap: () => onSelect(context, 0, 'Home')));
 
     // Admin and Super Admin roles get these pages
     if (role == 'admin' || role == 'superadmin') {
       drawerTiles.addAll([
-        _buildDrawerTile(context, icon: Icons.directions_car, title: 'Vehicle Logs', selected: selectedIndex == 2, onTap: () => onSelect(context, 2, 'Vehicle Logs')),
-        _buildDrawerTile(context, icon: Icons.warning_amber_rounded, title: 'Alert Logs', selected: selectedIndex == 3, onTap: () => onSelect(context, 3, 'Alert Logs')),
-        _buildDrawerTile(context, icon: Icons.do_not_disturb_on, title: 'Blacklist Management', selected: selectedIndex == 4, onTap: () => onSelect(context, 4, 'Blacklist Management')),
+        // REMOVED: Vehicle Logs (was index 2)
+
+        // Alert Logs (Now Index 2, Label updated)
+        _buildDrawerTile(context, icon: Icons.warning_amber_rounded, title: 'Alerts', selected: selectedIndex == 2, onTap: () => onSelect(context, 2, 'Alerts')),
+
+        // Blacklist Management (Now Index 3, Label updated)
+        _buildDrawerTile(context, icon: Icons.do_not_disturb_on, title: 'Suspect Management', selected: selectedIndex == 3, onTap: () => onSelect(context, 3, 'Suspect Management')),
       ]);
     }
 
-    // Only Super Admin gets the User Management page
+    // Only Super Admin gets the User Management page (Index 1)
     if (role == 'superadmin') {
-      drawerTiles.add(_buildDrawerTile(context, icon: Icons.group, title: 'User Management', selected: selectedIndex == 1, onTap: () => onSelect(context, 1, 'User Management')));
+      // Insert at position 1, maintaining the order: Home, User Mgt, Alerts...
+      drawerTiles.insert(1, _buildDrawerTile(context, icon: Icons.group, title: 'User Management', selected: selectedIndex == 1, onTap: () => onSelect(context, 1, 'User Management')));
     }
 
-    // All users have access to Settings
+    // All users have access to Settings (Now Index 4)
     drawerTiles.addAll([
       const Divider(height: 20, color: Colors.white24, indent: 16, endIndent: 16),
-      _buildDrawerTile(context, icon: Icons.settings, title: 'Settings', selected: selectedIndex == 5, onTap: () => onSelect(context, 5, 'Settings')),
+      _buildDrawerTile(context, icon: Icons.settings, title: 'Settings', selected: selectedIndex == 4, onTap: () => onSelect(context, 4, 'Settings')),
     ]);
 
     return Drawer(

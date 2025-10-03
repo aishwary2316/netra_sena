@@ -1,12 +1,13 @@
-// lib/pages/alert_logs.dart
+// lib/pages/alert_logs.dart (MODIFIED)
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/api_service.dart';
-import 'error.dart';
+import 'error.dart'; // Retained for error handling
 
+// MODIFIED: Removed _ActiveFilter.multipleDL
 enum _Severity { red, orange, none }
-enum _ActiveFilter { all, suspicious, systemAlerts, multipleDL }
+enum _ActiveFilter { all, suspicious, systemAlerts }
 
 class AlertLogsPage extends StatefulWidget {
   const AlertLogsPage({super.key});
@@ -30,7 +31,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
 
-  // New color palette from the vehicle logs design
+  // Color palette remains unchanged
   static const Color _primaryBlue = Color(0xFF1E3A8A);
   static const Color _lightGray = Color(0xFFF8FAFC);
   static const Color _textGray = Color(0xFF64748B);
@@ -39,8 +40,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
   static const Color _warningOrange = Color(0xFFD97706);
   static const Color _successGreen = Color(0xFF059669);
   static const Color _cardShadow = Color(0x0D000000);
-
-  // New yellow color for alerts
   static const Color _yellowAlert = Color(0xFFF5E063);
 
 
@@ -64,6 +63,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     super.dispose();
   }
 
+  /// MODIFIED: Uses _api.getFaceAlerts() which returns List<dynamic> on success or throws ApiException.
   Future<void> _fetchLogs() async {
     setState(() {
       _loading = true;
@@ -71,25 +71,26 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     });
 
     try {
-      final res = await _api.getLogs();
+      final logsList = await _api.getFaceAlerts(); // New API call
 
-      List<Map<String, dynamic>> normalized = [];
-
-      if (res is List) {
-        normalized = _normalizeDataToList(res);
-      } else if (res.containsKey('data')) {
-        normalized = _normalizeDataToList(res['data']);
-      } else {
-        normalized = _normalizeDataToList(res);
-      }
+      // Normalize List<dynamic> result into List<Map<String, dynamic>>
+      final normalized = logsList.map<Map<String, dynamic>>((e) {
+        if (e is Map) return Map<String, dynamic>.from(e);
+        return {'entry': e};
+      }).toList();
 
       setState(() {
         _logs = normalized;
       });
       _animationController.forward();
+    } on ApiException catch (e) {
+      // Handle API exception from the new service
+      setState(() {
+        _error = 'API Error fetching alerts: ${e.message}';
+      });
     } catch (e) {
       setState(() {
-        _error = 'Error fetching logs: $e';
+        _error = 'Error fetching alerts: $e';
       });
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -117,70 +118,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     }
   }
 
-  // Image builder supports http(s), data:base64, or plain base64.
-  Widget _buildImageWidget(dynamic img, double size, {VoidCallback? onTap}) {
-    if (img == null) {
-      return CircleAvatar(
-        radius: size / 2,
-        backgroundColor: _primaryBlue.withOpacity(0.1),
-        child: Icon(Icons.warning_amber_rounded,
-            size: size * 0.6, color: _primaryBlue),
-      );
-    }
-
-    try {
-      final s = img.toString();
-
-      if (s.startsWith('http') || s.startsWith('https')) {
-        return GestureDetector(
-          onTap: onTap,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Image.network(s,
-                width: size,
-                height: size,
-                fit: BoxFit.cover, errorBuilder: (_, __, ___) {
-                  return CircleAvatar(
-                      radius: size / 2,
-                      child: Icon(Icons.warning_amber_rounded, size: size * 0.6));
-                }),
-          ),
-        );
-      }
-
-      if (s.startsWith('data:')) {
-        final base64Str = s.split(',').last;
-        final bytes = base64Decode(base64Str);
-        return GestureDetector(
-            onTap: onTap,
-            child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.memory(bytes,
-                    width: size, height: size, fit: BoxFit.cover)));
-      }
-
-      if (s.length > 100 && RegExp(r'^[A-Za-z0-9+/=\s]+$').hasMatch(s)) {
-        final bytes = base64Decode(s.replaceAll('\n', ''));
-        return GestureDetector(
-            onTap: onTap,
-            child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.memory(bytes,
-                    width: size, height: size, fit: BoxFit.cover)));
-      }
-    } catch (_) {
-      // fallback
-    }
-
-    final label = img.toString();
-    return GestureDetector(
-        onTap: onTap,
-        child: CircleAvatar(
-            radius: size / 2,
-            backgroundColor: _primaryBlue.withOpacity(0.1),
-            child: Text(label.isNotEmpty ? label[0].toUpperCase() : '?',
-                style: const TextStyle(color: _primaryBlue))));
-  }
+  // Removed _buildImageWidget helper
 
   String _formatTimestamp(dynamic t) {
     if (t == null) return '';
@@ -195,7 +133,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
         if (parsed != null) {
           return '${parsed.year}-${_two(parsed.month)}-${_two(parsed.day)} ${_two(parsed.hour)}:${_two(parsed.minute)}';
         } else {
-          // Some servers return weird formats — show raw
           return t;
         }
       } else if (t is DateTime) {
@@ -208,22 +145,19 @@ class _AlertLogsPageState extends State<AlertLogsPage>
 
   String _two(int n) => n.toString().padLeft(2, '0');
 
+  /// MODIFIED: Removed checks for DL/RC multiple usage.
   _Severity _cardSeverity(Map<String, dynamic> item) {
     final alertType = (item['alert_type'] ?? '').toString().toLowerCase();
     final scannedBy = (item['scanned_by'] ?? '').toString().toLowerCase();
-    final reason = (item['description'] ?? item['reason'] ?? item['crime_involved'] ?? '').toString().toLowerCase();
     final driverStatus = (item['driver_status'] ?? item['driverStatus'] ?? '').toString().toLowerCase();
 
-    final multipleDLPattern = RegExp(r'used with\s*\d+|\b3 or more\b|\b\d+\s+or more\b', caseSensitive: false);
-    final isMultipleDL = multipleDLPattern.hasMatch(reason);
-
-    // If alert_type explicitly contains 'suspicious' or 'suspect'
+    // Explicit suspicious/suspect
     if (alertType.contains('suspicious') || alertType.contains('suspect')) {
       return _Severity.red;
     }
 
     // driver status explicit alert
-    if (driverStatus == 'alert') {
+    if (driverStatus == 'alert' || driverStatus == 'blacklisted') {
       return _Severity.red;
     }
 
@@ -231,11 +165,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     final suspiciousFlag = item['suspicious'];
     if (suspiciousFlag == true) {
       return _Severity.red;
-    }
-
-    // multiple-DL reason -> ORANGE
-    if (isMultipleDL) {
-      return _Severity.orange;
     }
 
     // scanned_by System Alert -> ORANGE
@@ -246,17 +175,17 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     return _Severity.none;
   }
 
+  /// MODIFIED: Search and filter logic only uses generic and face fields.
   List<Map<String, dynamic>> get _filtered {
     final q = _search.trim().toLowerCase();
     bySearch(Map<String, dynamic> item) {
       if (q.isEmpty) return true;
-      final dl = (item['dl_number'] ?? item['dl'] ?? item['licenseNumber'] ?? '').toString().toLowerCase();
-      final rc = (item['vehicle_number'] ?? item['regn_number'] ?? item['rc_number'] ?? item['rc'] ?? '').toString().toLowerCase();
+      // Removed DL and RC search fields
       final reason = (item['description'] ?? item['reason'] ?? item['crime_involved'] ?? '').toString().toLowerCase();
       final location = (item['location'] ?? '').toString().toLowerCase();
       final scannedBy = (item['scanned_by'] ?? '').toString().toLowerCase();
-      final driverName = (item['driver_name'] ?? item['driver'] ?? item['name'] ?? '').toString().toLowerCase();
-      return dl.contains(q) || rc.contains(q) || reason.contains(q) || location.contains(q) || scannedBy.contains(q) || driverName.contains(q);
+      final driverName = (item['driver_name'] ?? item['driver'] ?? item['name'] ?? item['person_name'] ?? '').toString().toLowerCase();
+      return reason.contains(q) || location.contains(q) || scannedBy.contains(q) || driverName.contains(q);
     }
 
     final list = _logs.where((item) => bySearch(item)).toList();
@@ -264,14 +193,8 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     if (_activeFilter == _ActiveFilter.all) return list;
     if (_activeFilter == _ActiveFilter.suspicious) return list.where((i) => _cardSeverity(i) == _Severity.red).toList();
     if (_activeFilter == _ActiveFilter.systemAlerts) return list.where((i) => _cardSeverity(i) == _Severity.orange && _isSystemAlert(i)).toList();
-    if (_activeFilter == _ActiveFilter.multipleDL) return list.where((i) => _cardSeverity(i) == _Severity.orange && _isMultipleDL(i)).toList();
-    return list;
-  }
 
-  bool _isMultipleDL(Map<String, dynamic> item) {
-    final reason = (item['description'] ?? item['reason'] ?? item['crime_involved'] ?? '').toString().toLowerCase();
-    final multipleDLPattern = RegExp(r'used with\s*\d+|\b3 or more\b|\b\d+\s+or more\b', caseSensitive: false);
-    return multipleDLPattern.hasMatch(reason);
+    return list;
   }
 
   bool _isSystemAlert(Map<String, dynamic> item) {
@@ -340,61 +263,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     );
   }
 
-  Future<void> _showImageFullscreen(BuildContext context, dynamic img) async {
-    if (img == null) return;
-    Widget content;
-    try {
-      final s = img.toString();
-      if (s.startsWith('http') || s.startsWith('https')) {
-        content = InteractiveViewer(child: Image.network(s, fit: BoxFit.contain));
-      } else if (s.startsWith('data:')) {
-        final base64Str = s.split(',').last;
-        final bytes = base64Decode(base64Str);
-        content = InteractiveViewer(child: Image.memory(bytes, fit: BoxFit.contain));
-      } else if (s.length > 100 && RegExp(r'^[A-Za-z0-9+/=\s]+$').hasMatch(s)) {
-        final bytes = base64Decode(s.replaceAll('\n', ''));
-        content = InteractiveViewer(child: Image.memory(bytes, fit: BoxFit.contain));
-      } else {
-        content = Center(child: Text(s));
-      }
-    } catch (e) {
-      content = Center(child: Text('Unable to preview image: $e'));
-    }
-
-    await showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.black87,
-        insetPadding: const EdgeInsets.all(16),
-        child: Container(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.9,
-            maxWidth: MediaQuery.of(context).size.width * 0.95,
-          ),
-          child: Column(
-            children: [
-              Expanded(child: content),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Text('Close'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Color _reasonColor(_Severity sev) {
     if (sev == _Severity.red) return _suspiciousRed;
     if (sev == _Severity.orange) return _warningOrange;
@@ -428,7 +296,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
                 child: TextField(
                   controller: _searchController,
                   decoration: InputDecoration(
-                    hintText: 'Search DL / RC / Reason / Location...',
+                    hintText: 'Search Driver / Reason / Location...',
                     hintStyle: TextStyle(
                       color: _textGray,
                       fontSize: 14,
@@ -529,7 +397,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
               _buildFilterOption('All Alerts', _ActiveFilter.all, Icons.format_list_bulleted_rounded),
               _buildFilterOption('Suspicious (Red)', _ActiveFilter.suspicious, Icons.warning_amber_rounded),
               _buildFilterOption('System Alerts (Orange)', _ActiveFilter.systemAlerts, Icons.notifications_rounded),
-              _buildFilterOption('Multiple DL (Orange)', _ActiveFilter.multipleDL, Icons.copy_all_rounded),
             ],
           ),
         );
@@ -593,8 +460,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
 
   Widget _buildLogCard(Map<String, dynamic> item) {
     final ts = item['timestamp'] ?? item['time'] ?? item['created_at'] ?? item['date'] ?? '';
-    final dlNumber = (item['dl_number'] ?? item['dl'] ?? item['licenseNumber'] ?? '').toString();
-    final rcNumber = (item['vehicle_number'] ?? item['regn_number'] ?? item['rc_number'] ?? item['rc'] ?? '').toString();
+    final driverName = (item['driver_name'] ?? item['driver'] ?? item['name'] ?? item['person_name'] ?? '').toString();
     final reason = (item['description'] ?? item['reason'] ?? item['crime_involved'] ?? '').toString();
 
     final sev = _cardSeverity(item);
@@ -649,6 +515,16 @@ class _AlertLogsPageState extends State<AlertLogsPage>
                       maxLines: 2,
                     ),
                     const SizedBox(height: 4),
+                    // MODIFIED: Added Driver Name prominently
+                    Text(
+                      'Driver: ${driverName.isNotEmpty ? driverName : 'N/A'}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _textGray,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
                     Text(
                       _formatTimestamp(ts),
                       style: TextStyle(
@@ -656,11 +532,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
                         color: _textGray,
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    if (dlNumber.isNotEmpty)
-                      _buildInfoRow('DL Number', dlNumber, Icons.credit_card_rounded),
-                    if (rcNumber.isNotEmpty)
-                      _buildInfoRow('RC Number', rcNumber, Icons.directions_car_rounded),
                   ],
                 ),
               ),
@@ -684,43 +555,6 @@ class _AlertLogsPageState extends State<AlertLogsPage>
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInfoRow(String label, String value, IconData icon) {
-    return InkWell(
-      onTap: () => _copyToClipboard(label, value),
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4.0),
-        child: Row(
-          children: [
-            Icon(icon, color: _textGray, size: 16),
-            const SizedBox(width: 8),
-            Text(
-              '$label: ',
-              style: TextStyle(
-                color: _textGray,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            Expanded(
-              child: Text(
-                value,
-                style: TextStyle(
-                  color: _primaryBlue.withOpacity(0.9),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(Icons.copy_rounded, color: _textGray.withOpacity(0.5), size: 14),
-          ],
         ),
       ),
     );
@@ -798,6 +632,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     );
   }
 
+  // ADDED: Implementation for the missing error state widget
   Widget _buildErrorState() {
     return Center(
       child: Padding(
@@ -866,6 +701,7 @@ class _AlertLogsPageState extends State<AlertLogsPage>
     );
   }
 
+  // ADDED: Implementation for the missing loading state widget
   Widget _buildLoadingState() {
     return Center(
       child: Column(

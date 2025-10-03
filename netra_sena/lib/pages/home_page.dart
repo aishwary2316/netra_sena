@@ -7,7 +7,6 @@ import '../services/api_service.dart';
 import 'auth.dart';
 import 'drawer.dart';
 import 'user_management.dart';
-import 'vehicle_logs.dart';
 import 'alert_logs.dart';
 import 'blacklist_management.dart';
 import 'settings.dart';
@@ -48,27 +47,25 @@ class _HomePageState extends State<HomePage> {
     _isActive = widget.isActive;
   }
 
+  // MODIFIED: Simplified to use the new api.logout() function
   Future<void> _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? userId = prefs.getString('user_id');
-    if (userId != null && userId.isNotEmpty) {
-      try {
-        // Call the server endpoint POST /api/logout/:userId
-        await _api.logoutServer(userId);
-      } catch (e) {
-        print('Server logout failed: $e. Proceeding with local logout.');
-        // Ignore server error and proceed to clear local session
-      }
-    }
-    await prefs.remove('userName');
-    await prefs.remove('userEmail');
-    await prefs.remove('role');
-    await prefs.remove('isActive');
-    await prefs.remove('loginTime');
+    try {
+      // Call the new logout method which handles server side and local clearing
+      await _api.logout();
+    } catch (e) {
+      print('Logout failed: $e. Proceeding with local logout to ensure user is logged out.');
+      // Manual local clear fallback if api.logout() fails or throws
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('user_name');
+      await prefs.remove('user_email');
+      await prefs.remove('user_role');
+      await prefs.remove('user_is_active');
+      await prefs.remove('user_login_time');
+      await prefs.remove('user_id');
 
-    const secureStorage = FlutterSecureStorage();
-    //await secureStorage.delete(key: 'auth_token');
-    await secureStorage.delete(key: 'jwt');
+      const secureStorage = FlutterSecureStorage();
+      await secureStorage.delete(key: 'jwt');
+    }
 
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -81,7 +78,6 @@ class _HomePageState extends State<HomePage> {
   late final List<Widget> _pages = [
     const HomePageContent(),
     UserManagementPage(role: widget.role),
-    const VehicleLogsPage(),
     const AlertLogsPage(),
     BlacklistManagementPage(role: widget.role),
     const SettingsPage(),
@@ -190,7 +186,7 @@ class _HomePageState extends State<HomePage> {
             backgroundColor: _headerBlue,
             foregroundColor: Colors.white,
             title: const Text(
-              "Netra Sena",
+              "Face Surveillance Portal", // MODIFIED TITLE
               style: TextStyle(fontWeight: FontWeight.w600),
             ),
             actions: [
