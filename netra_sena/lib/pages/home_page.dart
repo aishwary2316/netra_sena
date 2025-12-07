@@ -161,7 +161,7 @@ class _HomePageState extends State<HomePage> {
     if (selected != null) {
       if (selected == 'settings') {
         setState(() {
-          _selectedIndex = 5;
+          _selectedIndex = 4;
         });
       } else if (selected == 'profile') {
         Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfilePage()));
@@ -186,7 +186,7 @@ class _HomePageState extends State<HomePage> {
             backgroundColor: _headerBlue,
             foregroundColor: Colors.white,
             title: const Text(
-              "Face Surveillance Portal", // MODIFIED TITLE
+              "Netra Sena", // MODIFIED TITLE
               style: TextStyle(fontWeight: FontWeight.w600),
             ),
             actions: [

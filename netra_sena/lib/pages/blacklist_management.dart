@@ -1,4 +1,4 @@
-// lib/pages/blacklist_management.dart (MODIFIED)
+// lib/pages/blacklist_management.dart (UPDATED - handle externalSuspects + nested maps)
 import 'dart:async';
 import 'dart:io';
 
@@ -69,6 +69,11 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
 
   /// -----------------------
   /// Fetching function: Uses _api.getSuspects()
+  /// Robustly handles:
+  ///  - top-level map of "Name": [urls...]
+  ///  - wrapper { "suspects": { ... } }
+  ///  - wrapper { "externalSuspects": { ... } }
+  ///  - mixed wrapper: { "success": true, "externalSuspects": {...}, "localSuspects": {...} }
   /// -----------------------
   Future<void> _fetchFaces({bool fromSearch = false}) async {
     if (!mounted) return;
@@ -79,39 +84,74 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
 
     try {
       final resp = await _api.getSuspects();
-      // Expected response format: {'success': true, 'suspects': {'Name1': ['url1', 'url2'], ...}}
-      if (resp is Map && (resp['success'] == true || resp.containsKey('suspects'))) {
-        final rawSuspects = resp['suspects'] ?? resp;
-        final Map<String, List<String>> faceMap = {};
 
-        if (rawSuspects is Map) {
-          rawSuspects.forEach((key, value) {
-            if (value is List) {
-              final personName = key.toString();
-              if (personName.isNotEmpty) {
-                // Ensure all elements are strings (URLs)
-                faceMap[personName] = List<String>.from(value.map((url) => url.toString()));
-              }
-            }
+      // Debug: log what we received
+      debugPrint('getSuspects response runtimeType=${resp.runtimeType} body=$resp');
+
+      final Map<String, List<String>> faceMap = {};
+
+      if (resp is Map) {
+        // 1) If backend explicitly returns a 'suspects' map, use it.
+        if (resp.containsKey('suspects') && resp['suspects'] is Map) {
+          final dynamic raw = resp['suspects'];
+          raw.forEach((k, v) {
+            if (v is List) faceMap[k.toString()] = List<String>.from(v.map((x) => x.toString()));
           });
         }
-
-        final q = _faceSearchCtrl.text.trim().toLowerCase();
-        final Map<String, List<String>> filteredMap = q.isEmpty
-            ? faceMap
-            : {
-          for (var entry in faceMap.entries)
-            if (entry.key.toLowerCase().contains(q)) entry.key: entry.value
-        };
-        if (!mounted) return;
-        setState(() {
-          _faceMap = filteredMap;
-          _faceTotal = _faceMap.length;
-        });
+        // 2) Else if backend uses 'externalSuspects' (your logs), use that
+        else if (resp.containsKey('externalSuspects') && resp['externalSuspects'] is Map) {
+          final dynamic raw = resp['externalSuspects'];
+          raw.forEach((k, v) {
+            if (v is List) faceMap[k.toString()] = List<String>.from(v.map((x) => x.toString()));
+          });
+        }
+        // 3) Else attempt to scan the top-level map and merge any nested maps that look like suspect maps.
+        else {
+          // If resp itself is already a mapping of name -> list, collect those entries.
+          // But often resp contains wrapper keys like 'success' which are non-List values.
+          resp.forEach((key, value) {
+            // Case A: direct personName -> List
+            if (value is List) {
+              faceMap[key.toString()] = List<String>.from(value.map((x) => x.toString()));
+            }
+            // Case B: nested Map that contains personName -> List (e.g. externalSuspects: {...})
+            else if (value is Map) {
+              value.forEach((nk, nv) {
+                if (nv is List) {
+                  faceMap[nk.toString()] = List<String>.from(nv.map((x) => x.toString()));
+                }
+              });
+            }
+            // ignore other types (booleans, strings, numbers)
+          });
+        }
       } else {
+        // Not a Map at all
         if (!mounted) return;
-        setState(() => _errorFace = (resp is Map) ? resp['message'] ?? 'Failed to load face suspects' : 'Failed to load face suspects');
+        setState(() => _errorFace = 'Invalid server response: expected JSON object');
+        return;
       }
+
+      // If still empty, show debugging message
+      if (faceMap.isEmpty) {
+        debugPrint('Parsed faceMap is empty after scanning response. Full resp: $resp');
+      } else {
+        debugPrint('Parsed faceMap keys: ${faceMap.keys.toList()} (total ${faceMap.length})');
+      }
+
+      final q = _faceSearchCtrl.text.trim().toLowerCase();
+      final Map<String, List<String>> filteredMap = q.isEmpty
+          ? faceMap
+          : {
+        for (var entry in faceMap.entries)
+          if (entry.key.toLowerCase().contains(q)) entry.key: entry.value
+      };
+
+      if (!mounted) return;
+      setState(() {
+        _faceMap = filteredMap;
+        _faceTotal = _faceMap.length;
+      });
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _errorFace = 'API Error loading face suspects: ${e.message}');
@@ -158,17 +198,29 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
         if (Navigator.of(context, rootNavigator: true).canPop()) Navigator.of(context, rootNavigator: true).pop();
       } catch (_) {}
 
+      // Debug log
+      debugPrint('addSuspect response: $resp');
+
       if (!mounted) return;
-      if (resp is Map && (resp['success'] == true || resp['ok'] == true)) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Suspect added successfully!'), backgroundColor: Colors.green));
-        await _fetchFaces();
+
+      if (resp is Map) {
+        final status = resp['status']?.toString().toLowerCase();
+        final success = resp['success'] == true || resp['ok'] == true || status == 'queued_rebuild';
+        if (success) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Suspect added successfully!'), backgroundColor: Colors.green));
+          await _fetchFaces();
+        } else {
+          final msg = resp['message'] ?? resp['detail'] ?? 'Failed to add face suspect';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
+        }
       } else {
-        final msg = (resp is Map) ? resp['message'] ?? 'Failed to add face suspect' : 'Failed to add face suspect';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unexpected server response while adding suspect'), backgroundColor: Colors.red));
       }
     } on ApiException catch (e) {
       // Ensure loader removed
-      try { if (Navigator.of(context, rootNavigator: true).canPop()) Navigator.of(context, rootNavigator: true).pop(); } catch (_) {}
+      try {
+        if (Navigator.of(context, rootNavigator: true).canPop()) Navigator.of(context, rootNavigator: true).pop();
+      } catch (_) {}
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Add failed: ${e.message}'), backgroundColor: Colors.red));
     } catch (e) {
       // Ensure loader removed
@@ -183,16 +235,23 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
   Future<bool> _deleteFaceSuspectApi(String personName) async {
     try {
       final resp = await _api.deleteSuspectByName(personName);
-      // Success criteria: success=true or an explicit deletion count/message
-      if (resp['success'] == true || (resp['deleted'] is num && resp['deleted'] > 0)) {
-        return true;
+      debugPrint('deleteSuspectByName response: $resp');
+      if (resp is Map) {
+        // Accept several server signals as success:
+        // - explicit success flag
+        // - deleted count > 0
+        // - status == 'queued_rebuild' (per your FastAPI doc)
+        final status = resp['status']?.toString().toLowerCase();
+        if (resp['success'] == true) return true;
+        if (resp['deleted'] is num && resp['deleted'] > 0) return true;
+        if (status == 'queued_rebuild' || (resp['detail'] is String && resp['detail'].toString().toLowerCase().contains('deleted'))) return true;
       }
       return false;
     } on ApiException catch (e) {
       debugPrint('Delete failed due to API exception: ${e.message}');
       return false;
     } catch (e) {
-      debugPrint('Delete failed due to network error: $e');
+      debugPrint('Delete failed due to network/error: $e');
       return false;
     }
   }
@@ -318,18 +377,15 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
     );
   }
 
-  // Kept as helper for face images
+  // Kept as helper for face images (URL-encode path)
   String? _convertGsUrlToHttp(String? gsUrl) {
-    if (gsUrl == null || !gsUrl.startsWith('gs://')) {
-      return gsUrl;
-    }
+    if (gsUrl == null || !gsUrl.startsWith('gs://')) return gsUrl;
     final parts = gsUrl.substring(5).split('/');
-    if (parts.length < 2) {
-      return null;
-    }
+    if (parts.length < 2) return null;
     final bucket = parts.first;
-    final path = parts.sublist(1).join('/');
-    return 'https://storage.googleapis.com/$bucket/$path';
+    final objectPath = parts.sublist(1).join('/');
+    final encodedPath = Uri.encodeFull(objectPath); // important for spaces/special chars
+    return 'https://storage.googleapis.com/$bucket/$encodedPath';
   }
 
   Future<bool?> _showConfirmDialog(String text) {
@@ -437,6 +493,7 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
 
   // Simplified show details for face only
   void _showSuspectDetails(BuildContext parentContext, String name, List<dynamic> imageUrls) {
+    final List<String> urls = imageUrls.map((e) => e.toString()).toList();
     showDialog(
       context: parentContext,
       builder: (ctx) {
@@ -452,9 +509,9 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
                     Center(
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child: imageUrls.isNotEmpty
+                        child: urls.isNotEmpty
                             ? Image.network(
-                          _convertGsUrlToHttp(imageUrls.first)!,
+                          _convertGsUrlToHttp(urls.first)!,
                           height: MediaQuery.of(ctx).size.height * 0.25,
                           fit: BoxFit.cover,
                           errorBuilder: (c, e, s) => const Icon(Icons.broken_image, size: 100),
@@ -466,7 +523,7 @@ class _BlacklistManagementPageState extends State<BlacklistManagementPage>
                     Text('Name: $name', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     const SizedBox(height: 12),
                     const Text('Photos in database:', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ...imageUrls.map((url) => Text('- ${url.toString().split('/').last}')), // Ensure URL is string before split
+                    ...urls.map((url) => Text('- ${url.split('/').last}')),
                   ],
                 ),
               ),

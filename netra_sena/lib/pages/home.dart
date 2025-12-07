@@ -61,7 +61,7 @@ class _HomePageContentState extends State<HomePageContent> {
   // Only the driver image picker remains
   Future<void> _pickDriverImage() async {
     _showImageSourceOptions(
-      title: 'Select Driver Image',
+      title: 'Select Image',
       onCamera: () async {
         final XFile? picked = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
         if (picked != null) {
@@ -173,7 +173,7 @@ class _HomePageContentState extends State<HomePageContent> {
     }
 
     if (driverFile == null) {
-      _showErrorSnackBar('Please provide a Driver Image to verify.');
+      _showErrorSnackBar('Please provide a person\'s Image to verify.');
       return;
     }
 
@@ -184,7 +184,7 @@ class _HomePageContentState extends State<HomePageContent> {
       await verifyDriverAndShowDialog(
         context,
         driverImageFile: driverFile,
-        location: 'Toll-Plaza-1',
+        location: 'N/A',
         tollgate: 'Gate-A',
       );
     } catch (e) {
@@ -368,13 +368,13 @@ class _HomePageContentState extends State<HomePageContent> {
                     // Driver Image Section (Kept)
                     _buildSectionHeader(
                       icon: Icons.person,
-                      title: 'Upload Driver Image',
-                      subtitle: 'Upload a clear photo of the driver for face recognition', // UPDATED SUBTITLE
+                      title: 'Upload Image',
+                      subtitle: 'Upload a clear photo of the person for face recognition', // UPDATED SUBTITLE
                     ),
                     const SizedBox(height: 16),
 
                     _buildFileUploadCard(
-                      label: 'Choose Driver Image File',
+                      label: 'Choose Image File',
                       fileName: _driverImageName,
                       onTap: _pickDriverImage,
                       icon: Icons.person_add_alt_1,
@@ -419,7 +419,7 @@ class _HomePageContentState extends State<HomePageContent> {
                           children: const [
                             Icon(Icons.verified_user, size: 20),
                             SizedBox(width: 8),
-                            Text('Verify Driver Face', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)), // UPDATED TEXT
+                            Text('Verify Face', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)), // UPDATED TEXT
                           ],
                         ),
                       ),
@@ -441,7 +441,7 @@ class _HomePageContentState extends State<HomePageContent> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'AI-powered facial recognition will verify the driver against the suspect database.', // UPDATED TEXT
+                              'AI-powered facial recognition will verify against the suspect database.', // UPDATED TEXT
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.blue.shade700,

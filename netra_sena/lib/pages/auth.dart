@@ -110,7 +110,7 @@ class _LoginPageState extends State<LoginPage> {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
             builder: (_) => HomePage(
-              userName: name.isNotEmpty ? name : 'Operator',
+              userName: name.isNotEmpty ? name : 'officer',
               userEmail: userEmail,
               role: role,
               isActive: parseBool(data['isActive']),

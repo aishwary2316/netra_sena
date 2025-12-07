@@ -1,4 +1,4 @@
-// lib/pages/verification.dart (MODIFIED)
+// lib/pages/verification.dart
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -13,10 +13,9 @@ enum FieldState { normal, suspicious, missing, serviceUnavailable }
 /// High-level wrapper: creates ApiService and calls showVerificationDialog.
 Future<void> verifyDriverAndShowDialog(
     BuildContext context, {
-      // Removed dlNumber and rcNumber
       File? driverImageFile,
-      String location = 'Toll-Plaza-1',
-      String tollgate = 'Gate-A',
+      String location = 'N/A',
+      String tollgate = 'NA',
     }) async {
   final api = ApiService();
   await showVerificationDialog(
@@ -32,15 +31,13 @@ Future<void> verifyDriverAndShowDialog(
 Future<void> showVerificationDialog(
     BuildContext context, {
       required ApiService api,
-      // Removed dlNumber and rcNumber
       File? driverImage,
-      String location = 'Toll-Plaza-1',
-      String tollgate = 'Gate-A',
+      String location = 'N/A',
+      String tollgate = 'NA',
     }) async {
-  // Validate only for driver image
   if (driverImage == null) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Please provide a Driver image to verify.')),
+      const SnackBar(content: Text('Please provide a person\'s image to verify.')),
     );
     return;
   }
@@ -76,7 +73,6 @@ Future<void> showVerificationDialog(
   String? errorMessage;
 
   try {
-    // Only call the new Face Scan endpoint
     final result = await api.scanFace(
       imageFile: driverImage,
       extraFields: {
@@ -85,27 +81,93 @@ Future<void> showVerificationDialog(
       },
     );
 
-    if (result['success'] == true || result['ok'] == true) {
-      final d = result;
-      // Wrap the top-level response into 'driverData' for dashboard consistency
-      bodyMap = {'driverData': Map<String, dynamic>.from(d)};
+    debugPrint('scanFace raw response: $result');
 
-      // Ensure minimal suspicious flag is set
-      final status = (bodyMap['driverData']['status'] ?? '').toString().toLowerCase();
-      bodyMap['suspicious'] = status == 'alert' || status == 'blacklisted' || status == 'match';
+    // Ensure result is a Map
+    if (result is Map<String, dynamic>) {
+      // Helper to try to extract the best candidate map that contains meaningful keys (status/name/score/message/etc.)
+      Map<String, dynamic>? _extractDriverData(Map<String, dynamic> m) {
+        // Common wrappers
+        for (final k in ['driverData', 'data', 'result', 'recognition', 'payload']) {
+          if (m.containsKey(k) && m[k] is Map) {
+            return Map<String, dynamic>.from(m[k] as Map);
+          }
+        }
 
-    } else {
-      // Handle server returned success=false or ok=false
-      final serverMessage = result['message'] ?? result['error'];
-      if (serverMessage != null) {
-        errorMessage = serverMessage.toString();
-      } else {
-        errorMessage = 'Face scan failed (status unknown)';
+        // If current map itself looks like the recognition response (contains 'status' or 'score' or 'saved' etc.), return it
+        final topKeys = m.keys.map((k) => k.toString().toLowerCase()).toList();
+        final sentinelKeys = ['status', 'score', 'saved', 'local_backup', 'name', 'message', 'match_name', 'person_name'];
+        if (topKeys.any((tk) => sentinelKeys.contains(tk))) {
+          return Map<String, dynamic>.from(m);
+        }
+
+        // Otherwise scan nested maps and return the first nested map that looks like a recognition object
+        for (final v in m.values) {
+          if (v is Map) {
+            final nestedKeys = v.keys.map((k) => k.toString().toLowerCase()).toList();
+            if (nestedKeys.any((nk) => sentinelKeys.contains(nk))) {
+              return Map<String, dynamic>.from(v);
+            }
+          }
+        }
+
+        return null;
       }
+
+      final Map<String, dynamic>? driverData = _extractDriverData(result);
+
+      if (driverData != null) {
+        // Use the driverData and set suspicious flag based on status
+        bodyMap['driverData'] = driverData;
+        final status = (driverData['status'] ?? '').toString().toLowerCase();
+        bodyMap['suspicious'] = (status == 'alert' || status == 'blacklisted' || status == 'match' || status == 'suspicious');
+      } else {
+        // No candidate map found — check for explicit success/ok wrappers that might still contain nested maps
+        if (result['success'] == true || result['ok'] == true) {
+          // Try again to find nested map entries inside the wrapper
+          bool merged = false;
+          final Map<String, dynamic> mergedMap = {};
+          result.forEach((k, v) {
+            if (v is Map) {
+              v.forEach((nk, nv) {
+                // take first plausible nested mapping entries
+                mergedMap[nk.toString()] = nv;
+              });
+            }
+          });
+
+          if (mergedMap.isNotEmpty) {
+            final maybe = _extractDriverData(mergedMap);
+            if (maybe != null) {
+              bodyMap['driverData'] = maybe;
+              final status = (maybe['status'] ?? '').toString().toLowerCase();
+              bodyMap['suspicious'] = (status == 'alert' || status == 'blacklisted' || status == 'match' || status == 'suspicious');
+              merged = true;
+            }
+          }
+
+          if (!merged) {
+            // Could not locate meaningful data despite success flag
+            errorMessage = result['message']?.toString() ?? 'Unexpected success response shape from server';
+          }
+        } else {
+          // Server returned some other shape — try to fetch message or error
+          final serverMessage = result['message'] ?? result['error'];
+          if (serverMessage != null) {
+            errorMessage = serverMessage.toString();
+          } else {
+            errorMessage = 'Face scan failed: unexpected response structure';
+          }
+        }
+      }
+    } else {
+      errorMessage = 'Unexpected server response (not a JSON object)';
     }
   } on ApiException catch (e) {
+    debugPrint('ApiException in scanFace: ${e.message}');
     errorMessage = 'API Error: ${e.message}';
   } catch (e) {
+    debugPrint('Exception in scanFace: $e');
     errorMessage = 'An error occurred during verification: $e';
   }
 
@@ -114,21 +176,29 @@ Future<void> showVerificationDialog(
     Navigator.of(context, rootNavigator: true).pop();
   } catch (_) {}
 
+  // If there was an error, populate a fallback driverData so the dashboard shows an INCOMPLETE / service-unavailable view (yellow)
   if (errorMessage != null) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errorMessage)));
-    return;
-  }
-
-  // Fallback if bodyMap is empty
-  if (bodyMap.isEmpty || !bodyMap.containsKey('driverData')) {
     bodyMap = {
-      'driverData': driverImage != null ? {'status': 'N/A', 'provided': true, 'message': 'Empty or unexpected response from backend.'} : null,
+      'driverData': {
+        'status': 'service_unavailable',
+        'message': errorMessage,
+        'provided': true,
+      },
       'suspicious': false,
-      'note': 'Empty server body — showing local preview.',
+      'note': 'Error from server or unexpected response. See message for details.',
     };
+  } else {
+    // Defensive fallback if parsing produced nothing
+    if (bodyMap.isEmpty || !bodyMap.containsKey('driverData')) {
+      bodyMap = {
+        'driverData': driverImage != null ? {'status': 'N/A', 'provided': true, 'message': 'Empty or unexpected response from backend.'} : null,
+        'suspicious': false,
+        'note': 'Empty server body — showing local preview.',
+      };
+    }
   }
 
-  // Navigate to the new dashboard page
+  // Navigate to the new dashboard page (always show dashboard so errors are visible in the UI)
   Navigator.of(context).push(
     MaterialPageRoute<void>(
       builder: (ctx) => VerificationDashboard(api: api, body: bodyMap, driverImage: driverImage),
@@ -149,7 +219,6 @@ class VerificationDashboard extends StatefulWidget {
 }
 
 class _VerificationDashboardState extends State<VerificationDashboard> with TickerProviderStateMixin {
-  // Removed _fetchingUsage
   bool _showRawJson = false;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
@@ -178,7 +247,6 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
     return math.max(0.85, math.min(1.15, raw));
   }
 
-  // Removed dlData and rcData getters
   Map<String, dynamic>? get driverData => widget.body['driverData'] is Map ? Map<String, dynamic>.from(widget.body['driverData']) : null;
   bool get suspiciousFlag => widget.body['suspicious'] == true;
 
@@ -212,7 +280,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
     }
 
     // Service unavailable / error
-    if (status == 'service_unavailable' || status == 'serviceunavailable' || status == 'unavailable') {
+    if (status == 'service_unavailable' || status == 'serviceunavailable' || status == 'unavailable' || status == 'error') {
       return FieldState.serviceUnavailable;
     }
 
@@ -241,7 +309,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
     final faceSt = _stateFromData(driverData);
 
     if (faceSt == FieldState.suspicious) {
-      final r = _extractReason(driverData) ?? 'Driver face matched a suspicious entry';
+      final r = _extractReason(driverData) ?? 'Person\'s face matched a suspicious entry';
       reasons.add('Face: $r');
     }
 
@@ -279,8 +347,6 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
     if (_anyMissingOrError) return Icons.warning_amber;
     return Icons.verified;
   }
-
-  // REMOVED _fetchDLUsage, _showDLUsageDialog, _buildDetailRow
 
   // ---------------- Summary Row builder for verification summary -----------
   Widget _buildSummaryRow({required String title, required FieldState state, String? reason}) {
@@ -370,7 +436,6 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
     final primaryKeys = ['name', 'status', 'match_name', 'person_name'];
     final detailsKeys = ['message', 'face_matched', 'confidence', 'score', 'raw_result', 'detection_time'];
 
-
     return Theme(
       data: Theme.of(context).copyWith(
         cardTheme: CardThemeData(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), color: Colors.white),
@@ -378,7 +443,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
       child: Scaffold(
         backgroundColor: Colors.grey.shade50,
         appBar: AppBar(
-          title: Text('Face Verification Dashboard', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 18 * s)), // UPDATED TITLE
+          title: Text('Face Verification Dashboard', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 18 * s)),
           centerTitle: true,
           backgroundColor: const Color(0xFF1E40AF),
           elevation: 0,
@@ -455,7 +520,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
 
                     // Face row ONLY
                     _buildSummaryRow(
-                      title: 'Driver Face',
+                      title: 'Person\'s Face',
                       state: _faceState,
                       reason: _extractReason(displayData),
                     ),
@@ -480,7 +545,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
 
                 // Information Cards (ONLY DRIVER REMAINS)
                 _buildInfoCard(
-                  title: 'Driver Information',
+                  title: 'Suspect Information',
                   icon: Icons.person,
                   data: displayData,
                   primaryKeys: primaryKeys.where((key) => displayData.containsKey(key)).toList(),
@@ -531,7 +596,6 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
                   Expanded(
                     child: Container(
                       height: math.max(44 * s, 48),
-                      // Centered margin since only one button remains
                       margin: EdgeInsets.symmetric(horizontal: 8 * s),
                       child: OutlinedButton.icon(
                         icon: Icon(Icons.close, size: 18 * s),
@@ -599,7 +663,7 @@ class _VerificationDashboardState extends State<VerificationDashboard> with Tick
           padding: EdgeInsets.all(12 * s),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             // If this is driver info and a file was passed, show thumbnail
-            if (title == 'Driver Information' && widget.driverImage != null) ...[
+            if (title == 'Suspect Information' && widget.driverImage != null) ...[
               Center(
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(10),

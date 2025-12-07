@@ -1,16 +1,14 @@
 // lib/pages/user_management.dart
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:animate_do/animate_do.dart'; // Import for animations
+import 'package:animate_do/animate_do.dart';
+import '../services/api_service.dart';
 
 /// User Management page
-/// - GET  /api/users           -> fetch users
-/// - POST /api/users           -> add user  { name, email, password, role }
-/// - DELETE /api/users/:userId -> delete user
-/// - PUT /api/users/:userId    -> try to update user role (may not exist on server)
-///
-/// If PUT doesn't exist on server, the UI offers to delete+recreate the user with the new role.
+/// - GET: uses api.getUsers()
+/// - POST: uses api.createUser(username, password, role)
+/// - DELETE: uses api.deleteUserById(id)
 class UserManagementPage extends StatefulWidget {
   final String role;
   const UserManagementPage({super.key, required this.role});
@@ -20,7 +18,7 @@ class UserManagementPage extends StatefulWidget {
 }
 
 class _UserManagementPageState extends State<UserManagementPage> {
-  static const String BASE_URL = 'https://ai-tollgate-surveillance-1.onrender.com';
+  final ApiService _api = ApiService(debug: true);
 
   bool _loading = true;
   String? _error;
@@ -29,68 +27,70 @@ class _UserManagementPageState extends State<UserManagementPage> {
 
   final TextEditingController _searchController = TextEditingController();
 
-  // Add user form controllers
-  final _addFormKey = GlobalKey<FormState>();
-  final TextEditingController _addName = TextEditingController();
-  final TextEditingController _addEmail = TextEditingController();
-  final TextEditingController _addPassword = TextEditingController();
-  String _addRole = 'enduser'; // default role
-
-  // NEW: prevent double submissions
+  // Prevent double submissions at page-level
   bool _isAdding = false;
+
+  // New: whether to show deleted users (soft-deleted). Default: hide deleted users.
+  bool _showDeleted = false;
 
   @override
   void initState() {
     super.initState();
+    _searchController.addListener(() => _filterUsers(_searchController.text));
     _fetchUsers();
   }
 
   @override
   void dispose() {
     _searchController.dispose();
-    _addName.dispose();
-    _addEmail.dispose();
-    _addPassword.dispose();
     super.dispose();
   }
 
+  // ---------------------------
+  // API Fetching: Uses api.getUsers()
+  // ---------------------------
   Future<void> _fetchUsers() async {
     setState(() {
       _loading = true;
       _error = null;
     });
 
-    final uri = Uri.parse('$BASE_URL/api/users');
     try {
-      final res = await http.get(uri).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        final body = json.decode(res.body);
-        List<Map<String, dynamic>> items = [];
-        if (body is List) {
-          items = body.map<Map<String, dynamic>>((e) {
-            if (e is Map) return Map<String, dynamic>.from(e);
-            return {'entry': e};
-          }).toList();
-        } else if (body is Map) {
-          items = [Map<String, dynamic>.from(body)];
-        }
-        if (mounted) {
+      final resp = await _api.getUsers();
+
+      final body = resp['users'] ?? resp['data'] ?? resp;
+      List<Map<String, dynamic>> items = [];
+
+      if (body is List) {
+        items = body.map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e as Map)).toList();
+      } else if (body is Map) {
+        items = [Map<String, dynamic>.from(body)];
+      }
+
+      if (mounted) {
+        if (items.isNotEmpty || (resp['success'] == true && (resp['users'] ?? []).isEmpty)) {
           setState(() {
             _users = items;
-            _filterUsers(_searchController.text);
+            _filterUsers(_searchController.text); // apply current showDeleted & search
           });
-        }
-      } else {
-        if (mounted) {
+        } else {
           setState(() {
-            _error = 'Failed to load users: ${res.statusCode}';
+            _users = [];
+            _filteredUsers = [];
+            _error = resp['message'] ?? 'Failed to load users: Invalid response format or empty list.';
           });
         }
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = 'API Error fetching users: ${e.message}';
+        });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = 'Error fetching users: $e';
+          _error = 'Network Error fetching users: $e';
         });
       }
     } finally {
@@ -99,23 +99,31 @@ class _UserManagementPageState extends State<UserManagementPage> {
   }
 
   void _filterUsers(String query) {
-    if (query.trim().isEmpty) {
+    final trimmed = query.trim();
+    final lowerCaseQuery = trimmed.toLowerCase();
+
+    List<Map<String, dynamic>> candidates = List.from(_users);
+
+    // Filter by active/deleted according to _showDeleted flag
+    if (!_showDeleted) {
+      candidates = candidates.where((u) => _isUserActive(u)).toList();
+    }
+
+    if (lowerCaseQuery.isEmpty) {
       if (mounted) {
         setState(() {
-          _filteredUsers = List.from(_users);
+          _filteredUsers = candidates;
         });
       }
       return;
     }
 
-    final lowerCaseQuery = query.trim().toLowerCase();
     if (mounted) {
       setState(() {
-        _filteredUsers = _users.where((u) {
-          final name = (u['name'] ?? '').toString().toLowerCase();
-          final email = (u['email'] ?? '').toString().toLowerCase();
+        _filteredUsers = candidates.where((u) {
+          final username = (u['username'] ?? u['name'] ?? u['email'] ?? '').toString().toLowerCase();
           final role = (u['role'] ?? '').toString().toLowerCase();
-          return name.contains(lowerCaseQuery) || email.contains(lowerCaseQuery) || role.contains(lowerCaseQuery);
+          return username.contains(lowerCaseQuery) || role.contains(lowerCaseQuery);
         }).toList();
       });
     }
@@ -130,192 +138,121 @@ class _UserManagementPageState extends State<UserManagementPage> {
     return raw.toString();
   }
 
-  // NOTE: Now accepts dialogContext so we explicitly pop the dialog route.
-  Future<void> _addUser(BuildContext dialogContext) async {
-    if (_isAdding) return; // guard
-    if (!_addFormKey.currentState!.validate()) return;
+  bool _isUserActive(Map<String, dynamic> u) {
+    // Prefer 'active' boolean (server uses this)
+    if (u.containsKey('active')) return u['active'] == true;
+
+    if (u.containsKey('isActive')) return u['isActive'] == true;
+    if (u.containsKey('is_active')) return u['is_active'] == true;
+    if (u.containsKey('status')) {
+      final s = u['status']?.toString().toLowerCase();
+      return s == 'active' || s == 'enabled' || s == 'true';
+    }
+    // Default: assume active if not specified
+    return true;
+  }
+
+  // ---------------------------
+  // Create user with timeout
+  // ---------------------------
+  Future<bool> _createUserWithTimeout({
+    required String username,
+    required String password,
+    required String role,
+    Duration timeout = const Duration(seconds: 20)
+  }) async {
+    if (_isAdding) return false;
 
     setState(() => _isAdding = true);
 
-    final payload = {
-      'name': _addName.text.trim(),
-      'email': _addEmail.text.trim(),
-      'password': _addPassword.text.trim(),
-      'role': _addRole,
-    };
-
-    final uri = Uri.parse('$BASE_URL/api/users');
     try {
-      final res = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: json.encode(payload)).timeout(const Duration(seconds: 15));
-      if (mounted) {
-        if (res.statusCode == 201 || res.statusCode == 200) {
-          // Important: pop the dialog using the dialog's context so we don't accidentally pop other routes.
-          Navigator.of(dialogContext).pop();
-          // Show snackbar using the page's context (this).
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User added')));
-          _fetchUsers();
-        } else {
-          final body = res.body.isNotEmpty ? res.body : 'status ${res.statusCode}';
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Add failed: $body')));
-        }
+      final resp = await _api
+          .createUser(username: username, password: password, role: role)
+          .timeout(timeout, onTimeout: () => throw TimeoutException('Request timed out'));
+
+      if (resp['success'] == true) {
+        if (mounted) _fetchUsers();
+        return true;
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Add error: $e')));
-      }
+      return false;
     } finally {
       if (mounted) setState(() => _isAdding = false);
     }
   }
 
-  Future<void> _deleteUser(String userId) async {
-    final uri = Uri.parse('$BASE_URL/api/users/$userId');
+  // ---------------------------
+  // API Deleting User: Uses api.deleteUserById()
+  // Returns true if deleted, false otherwise
+  // ---------------------------
+  Future<bool> _deleteUser(String userId) async {
+    if (userId.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid user id.'), backgroundColor: Colors.red),
+        );
+      }
+      return false;
+    }
+
     try {
-      final res = await http.delete(uri).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
+      final resp = await _api
+          .deleteUserById(userId)
+          .timeout(const Duration(seconds: 25), onTimeout: () => throw TimeoutException('Request timed out'));
+
+      if (resp is Map && resp['success'] == true) {
+        // Optimistically update local list: mark user as inactive if possible
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User deleted')));
-          _fetchUsers();
+          setState(() {
+            for (var u in _users) {
+              final idRaw = u['_id'] ?? u['userId'] ?? u['id'];
+              if (_idOf(idRaw) == userId) {
+                // set the server-side soft-delete flag locally to reflect deletion instantly
+                u['active'] = false;
+                u['deletedAt'] = DateTime.now().toIso8601String();
+                break;
+              }
+            }
+            _filterUsers(_searchController.text);
+          });
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('User deleted successfully.'), backgroundColor: Colors.green),
+          );
         }
+
+        // Refresh authoritative list from server
+        if (mounted) await _fetchUsers();
+
+        return true;
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: ${res.statusCode}')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(resp['message'] ?? 'Failed to delete user.'), backgroundColor: Colors.red),
+          );
         }
+        return false;
       }
-    } catch (e) {
+    } on TimeoutException {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
-      }
-    }
-  }
-
-  /// Attempt to update role with PUT /api/users/:userId
-  /// If server responds 404/405 or other method not allowed, fallback to asking user whether to delete+recreate.
-  Future<void> _changeRole(String userId, String newRole, Map<String, dynamic> existingUser) async {
-    final uri = Uri.parse('$BASE_URL/api/users/$userId');
-    try {
-      final res = await http.put(uri, headers: {'Content-Type': 'application/json'}, body: json.encode({'role': newRole})).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Role updated')));
-          _fetchUsers();
-        }
-        return;
-      }
-      // If update endpoint not present, server might return 404 or 405; offer fallback
-      if (res.statusCode == 404 || res.statusCode == 405) {
-        final doDelete = await _showConfirmDialog(
-          'Your server does not support direct user updates (PUT).\n\nWould you like to delete and recreate the user with the new role? This preserves email but requires a password (you will enter a new password).',
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Delete request timed out.'), backgroundColor: Colors.red),
         );
-        if (doDelete == true) {
-          await _deleteAndRecreate(userId, existingUser, newRole);
-        }
-        return;
       }
-
-      // other non-200 codes: show message
+      return false;
+    } on ApiException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Update failed: ${res.statusCode} ${res.body}')));
-      }
-    } catch (e) {
-      // network or other error: fallback offer
-      final doDelete = await _showConfirmDialog(
-        'Could not update user directly: $e\n\nWould you like to delete and recreate the user with the new role?',
-      );
-      if (doDelete == true) {
-        await _deleteAndRecreate(userId, existingUser, newRole);
-      }
-    }
-  }
-
-  Future<void> _deleteAndRecreate(String userId, Map<String, dynamic> existingUser, String newRole) async {
-    // Delete
-    await _deleteUserWithToast(userId);
-
-    // Show dialog to enter new password for recreation
-    final pwdCtrl = TextEditingController();
-    final recreate = await showDialog<bool>(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('Recreate user', style: TextStyle(fontWeight: FontWeight.bold)),
-          content: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(ctx).size.width * 0.8,
-            ),
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Text('Recreating user ${existingUser['email'] ?? existingUser['name'] ?? ''} with role $newRole'),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: pwdCtrl,
-                  obscureText: true,
-                  decoration: InputDecoration(
-                    labelText: 'New password',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    prefixIcon: const Icon(Icons.lock),
-                  ),
-                ),
-              ]),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-            ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Recreate')),
-          ],
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('API Error: ${e.message}'), backgroundColor: Colors.red),
         );
-      },
-    );
-
-    if (recreate == true) {
-      final payload = {
-        'name': existingUser['name'] ?? existingUser['email'] ?? 'User',
-        'email': existingUser['email'] ?? '${DateTime.now().millisecondsSinceEpoch}@local',
-        'password': pwdCtrl.text.trim(),
-        'role': newRole,
-      };
-      final uri = Uri.parse('$BASE_URL/api/users');
-      try {
-        final res = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: json.encode(payload)).timeout(const Duration(seconds: 15));
-        if (res.statusCode == 201 || res.statusCode == 200) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User recreated with new role')));
-            _fetchUsers();
-          }
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Recreate failed: ${res.statusCode} ${res.body}')));
-          }
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Recreate error: $e')));
-        }
       }
-    } else {
-      // User cancelled recreate — nothing to do
-      _fetchUsers();
-    }
-  }
-
-  Future<void> _deleteUserWithToast(String id) async {
-    try {
-      final uri = Uri.parse('$BASE_URL/api/users/$id');
-      final res = await http.delete(uri).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User deleted')));
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: ${res.statusCode}')));
-        }
-      }
+      return false;
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e'), backgroundColor: Colors.red),
+        );
       }
+      return false;
     }
   }
 
@@ -329,7 +266,8 @@ class _UserManagementPageState extends State<UserManagementPage> {
             constraints: BoxConstraints(
               maxWidth: MediaQuery.of(ctx).size.width * 0.8,
             ),
-            child: Text(text)),
+            child: Text(text)
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
           ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Yes')),
@@ -338,85 +276,27 @@ class _UserManagementPageState extends State<UserManagementPage> {
     );
   }
 
-  void _showAddUserDialog() {
-    _addName.clear();
-    _addEmail.clear();
-    _addPassword.clear();
-    setState(() => _addRole = 'enduser'); // Reset state
-    showDialog(
+  // ---------------------------
+  // Bottom sheet to add a user (FIXED)
+  // ---------------------------
+  void _showAddUserBottomSheet() {
+    showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Add User', style: TextStyle(fontWeight: FontWeight.bold)),
-        content: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(ctx).size.width * 0.8,
-          ),
-          child: Form(
-            key: _addFormKey,
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextFormField(
-                  controller: _addName,
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Name required' : null,
-                  decoration: InputDecoration(
-                    labelText: 'Name',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    prefixIcon: const Icon(Icons.person_outline),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _addEmail,
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Email required' : null,
-                  decoration: InputDecoration(
-                    labelText: 'Email',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    prefixIcon: const Icon(Icons.email_outlined),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _addPassword,
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Password required' : null,
-                  obscureText: true,
-                  decoration: InputDecoration(
-                    labelText: 'Password',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    prefixIcon: const Icon(Icons.lock_outline),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  decoration: InputDecoration(
-                    labelText: 'Role',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    prefixIcon: const Icon(Icons.work_outline),
-                  ),
-                  value: _addRole,
-                  items: const [
-                    DropdownMenuItem(value: 'superadmin', child: Text('Super Admin')),
-                    DropdownMenuItem(value: 'admin', child: Text('Admin')),
-                    DropdownMenuItem(value: 'enduser', child: Text('End User')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) setState(() => _addRole = v);
-                  },
-                )
-              ]),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
-          // IMPORTANT: pass the dialog's ctx to _addUser so it can pop the dialog safely.
-          ElevatedButton(
-            onPressed: _isAdding ? null : () => _addUser(ctx),
-            child: _isAdding
-                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('Add User'),
-          ),
-        ],
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.transparent,
+      builder: (modalContext) => _AddUserBottomSheet(
+        onUserAdded: () {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('User added successfully.'), backgroundColor: Colors.green)
+            );
+            _fetchUsers();
+          }
+        },
+        createUserCallback: _createUserWithTimeout,
+        isAdding: _isAdding,
       ),
     );
   }
@@ -425,10 +305,9 @@ class _UserManagementPageState extends State<UserManagementPage> {
   Widget _userCard(Map<String, dynamic> u) {
     final idRaw = u['_id'] ?? u['userId'] ?? u['id'];
     final id = _idOf(idRaw);
-    final name = (u['name'] ?? '').toString();
-    final email = (u['email'] ?? '').toString();
-    final role = (u['role'] ?? 'enduser').toString();
-    final isActive = u['isActive'] == true;
+    final username = (u['username'] ?? u['name'] ?? u['email'] ?? 'N/A').toString();
+    final role = (u['role'] ?? 'officer').toString();
+    final isActive = _isUserActive(u);
     final roleIcon = _getRoleIcon(role);
 
     return FadeInUp(
@@ -438,7 +317,7 @@ class _UserManagementPageState extends State<UserManagementPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () {}, // Could show user details
+          onTap: () {},
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Row(
@@ -453,13 +332,14 @@ class _UserManagementPageState extends State<UserManagementPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        name.isNotEmpty ? name : email,
+                        username,
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                       const SizedBox(height: 4),
-                      Text(email, style: const TextStyle(color: Colors.black54)),
+                      if (u['email'] != null && u['email'].toString().isNotEmpty)
+                        Text(u['email'].toString(), style: const TextStyle(color: Colors.black54)),
                       const SizedBox(height: 8),
-                      Wrap( // Using Wrap to prevent overflow on small screens
+                      Wrap(
                         spacing: 8,
                         runSpacing: 8,
                         children: [
@@ -475,31 +355,41 @@ class _UserManagementPageState extends State<UserManagementPage> {
                     icon: const Icon(Icons.more_vert, color: Colors.black54),
                     onSelected: (v) async {
                       if (v == 'delete') {
-                        final confirm = await _showConfirmDialog('Delete user $email ?');
-                        if (confirm == true) {
-                          await _deleteUser(id);
+                        final confirm = await _showConfirmDialog('Delete user $username?');
+                        if (confirm == true && mounted) {
+                          // show loading dialog with rootNavigator to ensure it attaches to the app navigator
+                          showDialog(
+                            context: context,
+                            barrierDismissible: false,
+                            useRootNavigator: true,
+                            builder: (_) => const Center(child: CircularProgressIndicator()),
+                          );
+
+                          try {
+                            // _deleteUser has internal timeout/handling
+                            await _deleteUser(id);
+                          } finally {
+                            // always dismiss the loading dialog if still mounted
+                            if (mounted) {
+                              try {
+                                Navigator.of(context, rootNavigator: true).pop();
+                              } catch (_) {
+                                // ignore - already popped or navigator gone
+                              }
+                            }
+                          }
                         }
                       } else if (v == 'change_role') {
-                        final newRole = await showDialog<String>(
-                          context: context,
-                          builder: (ctx) => SimpleDialog(
-                            title: const Text('Select Role'),
-                            children: [
-                              SimpleDialogOption(onPressed: () => Navigator.of(ctx).pop('superadmin'), child: const Text('Super Admin')),
-                              SimpleDialogOption(onPressed: () => Navigator.of(ctx).pop('admin'), child: const Text('Admin')),
-                              SimpleDialogOption(onPressed: () => Navigator.of(ctx).pop('enduser'), child: const Text('End User')),
-                            ],
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Role update requires manual delete and re-add in the current API version.'),
+                            backgroundColor: Colors.orange,
                           ),
                         );
-                        if (newRole != null && newRole != role) {
-                          await _changeRole(id, newRole, u);
-                        }
-                      } else if (v == 'view_raw') {
-                        _showRawJson(u);
                       }
                     },
                     itemBuilder: (ctx) => [
-                      const PopupMenuItem(value: 'change_role', child: Text('Change Role')),
+                      const PopupMenuItem(value: 'change_role', child: Text('Change Role (Re-add Required)')),
                       const PopupMenuItem(value: 'delete', child: Text('Delete', style: TextStyle(color: Colors.red))),
                     ],
                   )
@@ -517,7 +407,7 @@ class _UserManagementPageState extends State<UserManagementPage> {
         return Icons.verified_user_rounded;
       case 'admin':
         return Icons.admin_panel_settings_rounded;
-      case 'enduser':
+      case 'officer':
       default:
         return Icons.person_rounded;
     }
@@ -529,7 +419,7 @@ class _UserManagementPageState extends State<UserManagementPage> {
         return Colors.blue.shade800;
       case 'admin':
         return Colors.indigo.shade600;
-      case 'enduser':
+      case 'officer':
       default:
         return Colors.grey.shade400;
     }
@@ -555,57 +445,26 @@ class _UserManagementPageState extends State<UserManagementPage> {
   }
 
   Widget _buildStatusBadge(bool isActive) {
+    // Active = green, Deleted/Inactive = red
+    final bg = isActive ? Colors.green.shade50 : Colors.red.shade50;
+    final border = isActive ? Colors.green.shade700 : Colors.red.shade700;
+    final txt = isActive ? 'Active' : 'Deleted';
+    final txtColor = isActive ? Colors.green.shade700 : Colors.red.shade700;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: isActive ? Colors.green.shade50 : Colors.grey.shade100,
+        color: bg,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: isActive ? Colors.green.shade700 : Colors.black54),
+        border: Border.all(color: border),
       ),
       child: Text(
-        isActive ? 'Active' : 'Inactive',
+        txt,
         style: TextStyle(
           fontSize: 10,
           fontWeight: FontWeight.bold,
-          color: isActive ? Colors.green.shade700 : Colors.black54,
+          color: txtColor,
         ),
-      ),
-    );
-  }
-
-  String _formatTimestamp(dynamic t) {
-    if (t == null) return '';
-    try {
-      if (t is int) {
-        DateTime dt = (t.toString().length > 10) ? DateTime.fromMillisecondsSinceEpoch(t) : DateTime.fromMillisecondsSinceEpoch(t * 1000);
-        return '${dt.year}-${_two(dt.month)}-${_two(dt.day)} ${_two(dt.hour)}:${_two(dt.minute)}';
-      } else if (t is String) {
-        final parsed = DateTime.tryParse(t);
-        if (parsed != null) {
-          return '${parsed.year}-${_two(parsed.month)}-${_two(parsed.day)} ${_two(parsed.hour)}:${_two(parsed.minute)}';
-        } else {
-          return t;
-        }
-      } else if (t is DateTime) {
-        final dt = t;
-        return '${dt.year}-${_two(dt.month)}-${_two(dt.day)} ${_two(dt.hour)}:${_two(dt.minute)}';
-      }
-    } catch (_) {}
-    return t.toString();
-  }
-
-  String _two(int n) => n.toString().padLeft(2, '0');
-
-  void _showRawJson(Map<String, dynamic> item) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Raw JSON'),
-        content: SizedBox(
-          width: MediaQuery.of(ctx).size.width * 0.8,
-          child: SingleChildScrollView(child: Text(const JsonEncoder.withIndent('  ').convert(item))),
-        ),
-        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close'))],
       ),
     );
   }
@@ -621,12 +480,12 @@ class _UserManagementPageState extends State<UserManagementPage> {
     const Color primaryBlue = Color(0xFF1E3A8A);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('User Management', style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: primaryBlue,
-        foregroundColor: Colors.white,
-        centerTitle: true,
-      ),
+      // appBar: AppBar(
+      //   title: const Text('User Management', style: TextStyle(fontWeight: FontWeight.bold)),
+      //   backgroundColor: primaryBlue,
+      //   foregroundColor: Colors.white,
+      //   centerTitle: true,
+      // ),
       backgroundColor: const Color(0xFFF0F4F8),
       body: SafeArea(
         child: _loading
@@ -665,7 +524,7 @@ class _UserManagementPageState extends State<UserManagementPage> {
                       child: TextField(
                         controller: _searchController,
                         decoration: InputDecoration(
-                          hintText: 'Search users...',
+                          hintText: 'Search username or role...',
                           prefixIcon: const Icon(Icons.search),
                           suffixIcon: _searchController.text.isNotEmpty
                               ? IconButton(
@@ -686,7 +545,7 @@ class _UserManagementPageState extends State<UserManagementPage> {
                     ),
                     const SizedBox(width: 8),
                     ElevatedButton.icon(
-                      onPressed: _showAddUserDialog,
+                      onPressed: _showAddUserBottomSheet,
                       icon: const Icon(Icons.add),
                       label: const Text('Add'),
                       style: ElevatedButton.styleFrom(
@@ -695,6 +554,51 @@ class _UserManagementPageState extends State<UserManagementPage> {
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
+                    ),
+                    const SizedBox(width: 8),
+                    // Three-dot popup menu beside Add button to toggle deleted users
+                    PopupMenuButton<String>(
+                      tooltip: _showDeleted ? 'Hide deleted users' : 'Show deleted users',
+                      icon: const Icon(Icons.more_vert, color: Colors.black54),
+                      onSelected: (v) {
+                        if (v == 'toggle_deleted') {
+                          setState(() {
+                            _showDeleted = !_showDeleted;
+                            _filterUsers(_searchController.text);
+                          });
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(_showDeleted ? 'Showing deleted users' : 'Hiding deleted users'),
+                              duration: const Duration(seconds: 1),
+                            ),
+                          );
+                        } else if (v == 'refresh') {
+                          _fetchUsers();
+                        }
+                      },
+                      itemBuilder: (ctx) => [
+                        PopupMenuItem(
+                          value: 'toggle_deleted',
+                          child: Row(
+                            children: [
+                              Icon(_showDeleted ? Icons.visibility_off : Icons.visibility, color: Colors.black54),
+                              const SizedBox(width: 8),
+                              Text(_showDeleted ? 'Hide Deleted Users' : 'Show Deleted Users'),
+                            ],
+                          ),
+                        ),
+                        const PopupMenuDivider(),
+                        const PopupMenuItem(
+                          value: 'refresh',
+                          child: Row(
+                            children: [
+                              Icon(Icons.refresh, color: Colors.black54),
+                              SizedBox(width: 8),
+                              Text('Refresh'),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -721,6 +625,260 @@ class _UserManagementPageState extends State<UserManagementPage> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------
+// Separate StatefulWidget for bottom sheet
+// ---------------------------
+class _AddUserBottomSheet extends StatefulWidget {
+  final VoidCallback onUserAdded;
+  final Future<bool> Function({required String username, required String password, required String role, Duration timeout}) createUserCallback;
+  final bool isAdding;
+
+  const _AddUserBottomSheet({
+    required this.onUserAdded,
+    required this.createUserCallback,
+    required this.isAdding,
+  });
+
+  @override
+  State<_AddUserBottomSheet> createState() => _AddUserBottomSheetState();
+}
+
+class _AddUserBottomSheetState extends State<_AddUserBottomSheet> {
+  final _formKey = GlobalKey<FormState>();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _usernameFocus = FocusNode();
+
+  String _currentRole = 'officer';
+  bool _localLoading = false;
+  String? _localError;
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-focus username field
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _usernameFocus.requestFocus();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _usernameFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_localLoading || widget.isAdding) return;
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _localLoading = true;
+      _localError = null;
+    });
+
+    try {
+      final success = await widget.createUserCallback(
+        username: _usernameController.text.trim(),
+        password: _passwordController.text.trim(),
+        role: _currentRole,
+        timeout: const Duration(seconds: 20),
+      );
+
+      if (!mounted) return;
+
+      if (success) {
+        Navigator.of(context).pop();
+        widget.onUserAdded();
+      } else {
+        setState(() => _localError = 'Add failed: server returned failure.');
+      }
+    } on TimeoutException {
+      if (mounted) {
+        setState(() => _localError = 'Request timed out after 20 seconds.');
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() => _localError = 'API Error: ${e.message}');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _localError = 'Error: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _localLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_localLoading && !widget.isAdding,
+      child: Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.6,
+        ),
+        padding: EdgeInsets.only(
+          top: 16,
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(20),
+            topRight: Radius.circular(20),
+          ),
+        ),
+        child: Stack(
+          children: [
+            SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                  const Text(
+                    'Add User',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+                  ),
+                  const SizedBox(height: 20),
+                  Form(
+                    key: _formKey,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextFormField(
+                          controller: _usernameController,
+                          focusNode: _usernameFocus,
+                          enabled: !_localLoading && !widget.isAdding,
+                          validator: (v) => v == null || v.trim().isEmpty ? 'Username required' : null,
+                          decoration: InputDecoration(
+                            labelText: 'Username',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                            prefixIcon: const Icon(Icons.person_outline),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        TextFormField(
+                          controller: _passwordController,
+                          enabled: !_localLoading && !widget.isAdding,
+                          validator: (v) => v == null || v.trim().isEmpty ? 'Password required' : null,
+                          obscureText: true,
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                            prefixIcon: const Icon(Icons.lock_outline),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<String>(
+                          decoration: InputDecoration(
+                            labelText: 'Role',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                            prefixIcon: const Icon(Icons.work_outline),
+                          ),
+                          value: _currentRole,
+                          items: const [
+                            DropdownMenuItem(value: 'superadmin', child: Text('Super Admin')),
+                            DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                            DropdownMenuItem(value: 'officer', child: Text('Officer')),
+                          ],
+                          onChanged: (_localLoading || widget.isAdding)
+                              ? null
+                              : (v) {
+                            if (v != null) setState(() => _currentRole = v);
+                          },
+                        ),
+                        const SizedBox(height: 20),
+                        if (_localError != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 16.0),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.error_outline, color: Colors.red),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _localError!,
+                                    style: const TextStyle(color: Colors.red),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: (_localLoading || widget.isAdding) ? null : _submit,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF1E3A8A),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                            child: (_localLoading || widget.isAdding)
+                                ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            )
+                                : const Text('Add User', style: TextStyle(fontSize: 16)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Full overlay when loading
+            if (_localLoading || widget.isAdding)
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(20),
+                      topRight: Radius.circular(20),
+                    ),
+                  ),
+                  child: const Center(
+                    child: CircularProgressIndicator(
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
